@@ -204,7 +204,10 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 		return false;
 	}
 
-	size = mpCnt * Kparams.BlockSize * sizeof(u64);
+	// KernelA indexes L1S2[BLOCK_X * BLOCK_SIZE + THREAD_X] as u32, so it needs
+	// BlockCnt * BlockSize entries. Sizing it from mpCnt as u64 is 2x oversized
+	// at one block per CU and an overrun above two.
+	size = (u64)Kparams.BlockCnt * Kparams.BlockSize * sizeof(u32);
 	total_mem += size;
 	err = cudaMalloc((void**)&Kparams.L1S2, size);
 	if (err != cudaSuccess)
@@ -602,7 +605,8 @@ bool RCGpuKang::Start()
 	}
 	free(gpu_pnts);
 
-	err = cudaMemset(Kparams.L1S2, 0, mpCnt * Kparams.BlockSize * 8);
+	// Must match the allocation above.
+	err = cudaMemset(Kparams.L1S2, 0, (u64)Kparams.BlockCnt * Kparams.BlockSize * sizeof(u32));
 	if (err != cudaSuccess)
 		return false;
 	cudaMemset(Kparams.dbg_buf, 0, 1024);
