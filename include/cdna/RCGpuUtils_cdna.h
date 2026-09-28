@@ -76,11 +76,6 @@ typedef unsigned __int128 u128;
 #define P_INV32     0x000003D1              // the 977 part; the 2^32 part is a word offset
 #define P0_INV_FULL 0x00000001000003D1ull   // 2^32 + 977
 
-// The assembly primitives live in a generated header; see
-// docs/CDNA_PHASE2_DESIGN.md and tools/gen_asm.py. Included after the typedefs
-// above, which it uses.
-#include "asm_primitives.h"
-
 // ---------------------------------------------------------------------------
 // Carry primitives.
 //
@@ -121,6 +116,12 @@ __device__ __forceinline__ u32 sbb32(u32 a, u32 b, u32* borrow)
     *borrow = bout;
     return r;
 }
+
+// The assembly primitives live in a generated header; see
+// docs/CDNA_PHASE2_DESIGN.md and tools/gen_asm.py. Included here rather than at
+// the top because the generated reduction uses adc32 and the P_* constants
+// declared above.
+#include "asm_primitives.h"
 
 // ---------------------------------------------------------------------------
 // Copies. Copy_int4_x2 moves 256 bits as two 128-bit vector accesses; sources
@@ -357,7 +358,7 @@ __device__ __forceinline__ void MulModP(u64* res, const u64* val1, const u64* va
 {
     u64 buff[8];
     mul_256_to_512_asm(buff, val1, val2);
-    reduce_512_to_256(res, buff);
+    reduce_512_to_256_asm(res, buff);
 }
 
 // See the header comment: a dedicated squaring is a net loss on CDNA because
@@ -368,7 +369,7 @@ __device__ __forceinline__ void SqrModP(u64* res, const u64* val)
 {
     u64 buff[8];
     mul_256_to_512_asm(buff, val, val);
-    reduce_512_to_256(res, buff);
+    reduce_512_to_256_asm(res, buff);
 }
 
 // ---------------------------------------------------------------------------
