@@ -155,3 +155,93 @@ cheaper to discover early.
   occupancy. Small and unmeasured.
 - **Host-side usability** carried over from AMDKangaroo: dynamic DP validation, per-GPU
   statistics, progress display.
+
+---
+
+# Phase 4 step 1: attempted, and the result closes Phase 4
+
+Step 1 was to fuse `SubModP` into `MulModP`, on the theory that the 347 register moves per
+group body were overhead at inline-asm block boundaries. Two measurements killed it, and a
+third invalidated the metric the whole plan rested on.
+
+## The Sub -> Mul boundary is already free
+
+| | issue slots |
+|---|---|
+| `MulModP` alone | 270 |
+| `SubModP` alone | 30 |
+| Sub + Mul together | **290** |
+| sum if the boundary cost nothing | 300 |
+| boundary overhead | **-10** |
+
+Fusing them recovers nothing - the pair together already costs *less* than the two
+separately, so the compiler optimises across the boundary. The premise was wrong.
+
+## Where the moves actually are
+
+| Bucket | moves |
+|---|---|
+| Multiply and square column bookkeeping | 240 |
+| `SubModP` internals | 28 |
+| Kernel glue (addressing, loop, DP, jump list) | 79 |
+
+**268 of 347 are inside the primitives**, and the multiply's are structurally required:
+`v_mad_u64_u32` needs an even-aligned VGPR pair for its 64-bit addend, so a 32-bit-granular
+sliding accumulator costs about two moves per column however it is arranged. The compiler
+manages 40 per multiply where a naive hand-written version needs ~60. Hand-writing it would
+be worse, not better.
+
+## s_nop is free, which invalidates the "issue slots" metric
+
+The fallback for step 1 was to move the reduction's remaining C++ tail into assembly. It
+works and passes 10,000,000 differential vectors, and it cut `MulModP` from 240 VALU + 30
+wait states to 238 + 17 - a 5.6% reduction by the slot metric used throughout this port.
+
+Back-to-back A/B/A on the full node:
+
+| | MulModP | max MKeys/s |
+|---|---|---|
+| A: C++ reduction tail | 240 + 30 | 84,341 |
+| B: asm reduction tail | 238 + 17 | 84,232 |
+| A again | 240 + 30 | 84,531 |
+
+Run-to-run noise 0.23%; measured effect -0.24%. **No gain.**
+
+The reason is that 13 of the 15 removed slots were `s_nop`. CDNA issues scalar and vector
+instructions independently, so at 3 waves/SIMD another wave's VALU work fills the cycle a
+wait state would otherwise occupy. **`s_nop` costs nothing at this occupancy**, and counting
+it alongside VALU instructions - as this port's "issue slots" figure did throughout -
+overstates the cost of everything that generates them.
+
+The change was reverted: no measurable benefit, and it adds an asm block and eight
+temporaries.
+
+## Revised prize, and the recommendation
+
+Recomputing on VALU count alone, which is what actually costs time:
+
+| | |
+|---|---|
+| KernelA VALU per point-addition | 1,971 |
+| Moves inside the multiply and square (required) | 240 |
+| Moves inside `SubModP` (required) | 28 |
+| **Kernel glue moves (removable)** | **79 = 4.0%** |
+
+**Phase 4 is worth about 4%**, roughly 84,400 to 87,600 MKeys/s for the node - for
+hand-writing and hand-scheduling ~2,500 lines of assembly with no differential test able to
+cover it.
+
+**Recommendation: close Phase 4.** The earlier estimate of +12-35% came from counting
+`s_nop` as real cost and from assuming the moves were boundary overhead. Both were wrong,
+and both were cheap to test. The arithmetic is at 87% of VALU peak in isolation, the
+primitives' remaining moves are structurally required by the ISA, and what is left is a
+4% sliver behind a large, poorly-testable rewrite.
+
+## A note on measurement method
+
+Two errors in this session came from reading the speed display too early. The solver
+averages over a 16-entry ring initialised to zero, so figures taken before roughly 12-14
+reports run low - one comparison was reported as a 2% regression that a back-to-back rerun
+showed to be 0.24%. Any A/B here needs to be run back to back in one session, taking the
+maximum over 13 or more samples, with the baseline re-measured alongside to establish the
+noise floor.
