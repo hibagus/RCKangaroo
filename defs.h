@@ -27,6 +27,7 @@ typedef char i8;
 #define JMP_CNT				512
 
 #define BLOCK_SIZE			256	
+
 #define PNT_GROUP_CNT		24
 
 // kang type

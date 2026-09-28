@@ -124,7 +124,7 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 	// Occupancy is pinned by amdgpu_waves_per_eu in the kernel attributes, so
 	// unlike the CUDA build there is no need to over-request LDS to force
 	// 1 block/CU - these are the real working-set sizes.
-	Kparams.KernelA_LDS_Size = 32 * 1024;
+	Kparams.KernelA_LDS_Size = 16 * 1024;
 	Kparams.KernelB_LDS_Size = 48 * 1024;
 	Kparams.KernelC_LDS_Size = 96 * JMP_CNT;
 #else

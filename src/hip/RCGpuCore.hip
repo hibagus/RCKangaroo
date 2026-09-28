@@ -92,15 +92,15 @@ extern __shared__ u64 LDS[];
 // then a 4-limb distance only KernelB reads).
 #define LOAD_JMP_X(dst_x, ind, use2) { \
     if (use2) { Copy_int4_x2(dst_x, jmp2_table + 12 * (ind)); } \
-    else      { Copy_int4_x2(dst_x, jmp1_table + 8 * (ind)); } }
+    else      { Copy_int4_x2(dst_x, jmp1x_table + 4 * (ind)); } }
 
 #define LOAD_JMP_XY(dst_x, dst_y, ind, use2) { \
     if (use2) { \
         Copy_int4_x2(dst_x, jmp2_table + 12 * (ind)); \
         Copy_int4_x2(dst_y, jmp2_table + 12 * (ind) + 4); \
     } else { \
-        Copy_int4_x2(dst_x, jmp1_table + 8 * (ind)); \
-        Copy_int4_x2(dst_y, jmp1_table + 8 * (ind) + 4); \
+        Copy_int4_x2(dst_x, jmp1x_table + 4 * (ind)); \
+        Copy_int4_x2(dst_y, jmp1_glb + 12 * (ind) + 4); \
     } }
 
 // One 256-thread workgroup per CU, 1 wave per SIMD. See note 2 above: this is
@@ -141,18 +141,23 @@ __global__ void KernelA(const TKparams Kparams)
     u64* x_last0 = Kparams.LastPnts + 4 * (THREAD_X + BLOCK_SIZE * BLOCK_X);
     u64* y_last0 = x_last0 + PartStride / 8;
 
-    // Only the hot table goes to LDS - see note 5. Source stride is 12 because
-    // each entry carries a 4-limb distance after x and y; only KernelB needs
-    // those. ds_write_b128 needs 16-byte alignment, which both strides satisfy.
-    u64* jmp1_table = LDS;                      // 32 KB: JMP_CNT x {x[4], y[4]}
+    // LDS holds only the jmp1 x-coordinates - 16 KB rather than 32. x is read
+    // twice per group (once building the inverse product, once applying the
+    // jump) while y is read once, so y stays in global. Halving the LDS
+    // footprint is what raises occupancy from 2 to 3 waves/SIMD; see note 5.
+    //
+    // Source stride is 12 because each entry carries y and then a 4-limb
+    // distance after x; only KernelB needs the distances. ds_write_b128 needs
+    // 16-byte alignment, which both strides satisfy.
+    u64* jmp1x_table = LDS;                     // 16 KB: JMP_CNT x x[4]
+    const u64* jmp1_glb = Kparams.Jumps1;       // global, stride 12
     const u64* jmp2_table = Kparams.Jumps2;     // global, stride 12
 
     int i = THREAD_X;
     while (i < JMP_CNT)
     {
-        #pragma unroll
-        for (int k = 0; k < 8; k += 2)
-            *(int4*)&jmp1_table[8 * i + k] = *(int4*)&Kparams.Jumps1[12 * i + k];
+        *(int4*)&jmp1x_table[4 * i + 0] = *(int4*)&Kparams.Jumps1[12 * i + 0];
+        *(int4*)&jmp1x_table[4 * i + 2] = *(int4*)&Kparams.Jumps1[12 * i + 2];
         i += BLOCK_SIZE;
     }
 
