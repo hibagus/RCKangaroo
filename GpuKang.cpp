@@ -23,11 +23,49 @@ void CallGpuKernelC(TKparams Kparams);
 void AddPointsToList(u32* data, int cnt, u32 KangCnt, u64 ops_cnt, int JumperInd);
 extern bool gGenMode; //tames generation mode
 
+// How many workgroups to launch per CU/SM.
+//
+// RC's design is one persistent block per SM, which on NVIDIA is effectively
+// forced: KernelA requests 98 KB of shared memory, so a second block cannot fit.
+// The consequence is 1 wave/SIMD and therefore no latency hiding at all - every
+// memory access stalls the only resident wave. RC compensates by hand-scheduling
+// the overlap in SASS.
+//
+// This port's KernelA needs 32 KB of LDS and 153 VGPRs, so a CDNA3 CU can host
+// two workgroups (64 KB of 64 KB LDS, 306 of 512 VGPRs). But occupancy is capped
+// by whichever resource runs out first, and with BlockCnt == mpCnt the *grid* is
+// the cap: 304 workgroups over 304 CUs is one each no matter what fits.
+// Launching 2x the workgroups is what actually raises occupancy.
+//
+// Costs proportional memory, since KangCnt scales with it, and costs DP overhead
+// at small ranges - see docs/CDNA_PHASE1_RESULTS.md. Override with
+// RCK_BLOCKS_PER_CU; 1 is the better setting below ~85 bits.
+static int GetBlocksPerCU()
+{
+#ifdef __HIP_PLATFORM_AMD__
+	static int cached = -1;
+	if (cached < 0)
+	{
+		cached = 2;
+		const char* e = getenv("RCK_BLOCKS_PER_CU");
+		if (e)
+		{
+			int v = atoi(e);
+			if (v >= 1 && v <= 8)
+				cached = v;
+		}
+	}
+	return cached;
+#else
+	return 1;
+#endif
+}
+
 int RCGpuKang::CalcKangCnt()
 {
 	// Must match Prepare(), otherwise the DP and K estimates printed at startup
 	// are computed from a different kangaroo count than the run actually uses.
-	Kparams.BlockCnt = mpCnt - sm_inv_cnt;
+	Kparams.BlockCnt = (mpCnt - sm_inv_cnt) * GetBlocksPerCU();
 	Kparams.BlockSize = BLOCK_SIZE;
 	Kparams.GroupCnt = PNT_GROUP_CNT;
 	return Kparams.BlockSize* Kparams.GroupCnt* Kparams.BlockCnt;
@@ -71,7 +109,7 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 	}
 #endif
 
-	Kparams.BlockCnt = mpCnt - sm_inv_cnt;
+	Kparams.BlockCnt = (mpCnt - sm_inv_cnt) * GetBlocksPerCU();
 	Kparams.BlockSize = BLOCK_SIZE;
 	Kparams.GroupCnt = PNT_GROUP_CNT;
 	KangCnt = Kparams.BlockSize * Kparams.GroupCnt * Kparams.BlockCnt;
