@@ -1,6 +1,6 @@
 # RCKangaroo ROCm Porting and Optimization Plan
 
-Status: Phase 6 kernel tuning complete on `gfx950`; `gfx942` runtime tuning is pending
+Status: Phase 8 ISA gate complete on `gfx950`; `gfx942` runtime validation is pending
 Last updated: 2026-09-28
 Targets: AMD Instinct MI300X (`gfx942`, CDNA3) and MI355X (`gfx950`, CDNA4)
 
@@ -114,6 +114,8 @@ RCKangaroo/
 │   ├── PHASE4_FIELD_ARITHMETIC.md
 │   ├── PHASE5_WAVE64_INVERSION.md
 │   ├── PHASE6_KERNEL_TUNING.md
+│   ├── PHASE7_HOST_MULTI_GPU.md
+│   ├── PHASE8_AMD_ISA_GATE.md
 │   └── *.pdf
 └── legacy/cuda/
     ├── asm/
@@ -527,6 +529,29 @@ If tuned HIP and inline AMDGCN remain limited by compiler scheduling:
 
 This phase should target profiler-proven bottlenecks rather than rewriting every kernel in assembly.
 
+Assessment checkpoint (2026-09-28), with the complete protocol and evidence in
+[PHASE8_AMD_ISA_GATE.md](PHASE8_AMD_ISA_GATE.md):
+
+- Added a one-command correctness, primitive-performance, resource, and ISA
+  admission gate with a 3% per-operation threshold.
+- Revalidated 4,096 arithmetic and 256 inversion vectors on MI355X before
+  measuring 15 samples per candidate.
+- Compiler-generated Comba MAD beat explicit AMDGCN MUL/carry by 18.05% for
+  multiply, 21.03% for square, and 16.98% for fixed-chain inversion.
+- The explicit candidate uses fewer VGPRs but increases static instruction
+  count. The selected integrated `gfx942` and `gfx950` hot kernels remain
+  spill-free, and the target field summaries match.
+- Retained the directly compiled HIP fallback as production. No handwritten
+  full-kernel source, generated binary, or module loader is added without a
+  candidate that passes both the primitive and end-to-end gates.
+
+The `gfx950` conditional trigger for handwritten code objects is not met, so
+that portion of Phase 8 is complete as an evidence-backed no-op. The
+source-build, module-loader, and dual-architecture implementation criteria
+activate if a future candidate first passes the admission gate. Overall Phase
+8 remains provisional until the gate can run on physical MI300X hardware,
+which may justify an architecture-specific implementation.
+
 Exit criteria:
 
 - Assembly variants have complete correctness coverage.
@@ -637,6 +662,7 @@ Record major choices here as implementation progresses.
 | 2026-09-28 | Select compiler-generated Comba MAD and fixed addition-chain inversion on `gfx950`; keep explicit assembly as a measured fallback. | Comba MAD was 13.1x faster for multiply and its chain inversion was 24.6x faster than the portable baseline; explicit MUL/carry assembly was slower. |
 | 2026-09-28 | Retain per-lane inversion and reject wave64 batching and a persistent inversion queue for the current fixed chain. | The queue-free wave64 primitive was correct but 2.566x slower on MI355X, spilled eight VGPRs, and still issued the lane-0 inversion as a wave instruction stream. |
 | 2026-09-28 | Select 256 threads, 32 groups, 2,048 steps, 64 KiB table LDS, and workgroup-major state on `gfx950`; keep conservative `gfx942` defaults provisional. | Correctness-gated MI355X sweeps and confirmations selected every value; `gfx942` is spill-free and within 64 KiB LDS but has not run on MI300X. |
+| 2026-09-28 | Do not add handwritten AMD code objects without a measured admission win. | The compiler Comba path beat explicit MUL/carry ISA by 16.98-21.03% across multiply, square, and inversion; the production hot kernels are spill-free. |
 
 ## 10. Progress checklist
 
@@ -648,5 +674,5 @@ Record major choices here as implementation progresses.
 - [ ] Phase 5: wave64 inversion design (`gfx950` complete; `gfx942` runtime pending)
 - [ ] Phase 6: per-architecture kernel tuning (`gfx950` complete; `gfx942` runtime pending)
 - [x] Phase 7: host and multi-GPU optimization
-- [ ] Phase 8: optional handwritten AMD ISA
+- [ ] Phase 8: optional handwritten AMD ISA (`gfx950` gate complete; `gfx942` runtime pending)
 - [ ] Phase 9: documentation and continuous validation

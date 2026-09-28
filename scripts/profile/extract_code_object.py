@@ -15,6 +15,16 @@ from common import ROOT, build_targets, create_output_directory, run, write_json
 
 HOT_KERNELS = ("KernelGen", "KernelA", "KernelB", "KernelC")
 DYNAMIC_LDS = {"KernelGen": 0, "KernelB": 49152, "KernelC": 49152}
+SELECTED_INSTRUCTIONS = (
+    "v_mad_u64_u32",
+    "v_mul_lo_u32",
+    "v_mul_hi_u32",
+    "v_add_co_u32",
+    "v_addc_co_u32",
+    "ds_bpermute_b32",
+    "s_waitcnt",
+    "s_barrier",
+)
 
 
 def dynamic_lds_bytes(kernel: str, code_object: str) -> int:
@@ -101,6 +111,9 @@ def parse_instruction_mix(disassembly: str, code_object: str) -> list[dict[str, 
         mnemonic = match.group(1)
         mixes[current][instruction_category(mnemonic)] += 1
         mixes[current]["total"] += 1
+        for selected in SELECTED_INSTRUCTIONS:
+            if mnemonic == selected or mnemonic.startswith(f"{selected}_"):
+                mixes[current][selected] += 1
     records = []
     for kernel, counts in mixes.items():
         if counts["total"]:

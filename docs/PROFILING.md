@@ -118,11 +118,29 @@ The wave64 suite additionally counts `ds_bpermute_b32` wave shuffles. See
 [PHASE5_WAVE64_INVERSION.md](PHASE5_WAVE64_INVERSION.md) for the result and
 selection decision.
 
+Phase 8 combines correctness, field-candidate timing, standalone ISA, and
+integrated hot-kernel ISA into one admission gate:
+
+```sh
+python3 scripts/benchmark/run_phase8_isa_gate.py \
+  --preset mi355x --device 0 --samples 15
+```
+
+An explicit-ISA operation must beat the selected compiler path by at least 3%
+before production integration and end-to-end benchmarking are justified. The
+runner writes `gate.json` and `summary.md` beside the complete artifacts. A
+failed admission test is a successful run with the decision
+`retain_compiler_generated_hip`, not a script error. See
+[PHASE8_AMD_ISA_GATE.md](PHASE8_AMD_ISA_GATE.md) for the current result and the
+second-stage end-to-end requirement.
+
 `resources.json` reports compiler metadata for every hot kernel, including
 VGPR, SGPR, AGPR, spills, private memory, static/dynamic LDS, wave size, and
 maximum workgroup size. `instruction_mix.json` classifies the generated ISA as
-VALU, SALU, VMEM, LDS, atomic, or other. The full disassembly remains the source
-of truth when an instruction-level optimization is evaluated.
+VALU, SALU, VMEM, LDS, atomic, or other. It also counts selected field, carry,
+wait, barrier, and wave-shuffle instructions used by ISA studies. The full
+disassembly remains the source of truth when an instruction-level optimization
+is evaluated.
 KernelA's launch-time LDS accounting follows the production architecture table:
 32 KiB for gfx942 and 64 KiB for gfx950.
 

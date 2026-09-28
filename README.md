@@ -63,6 +63,13 @@ disabled with RCK_USE_ARCH_TABLE_DEFAULTS and
 RCK_USE_ARCH_STATE_LAYOUT_DEFAULTS. See
 docs/PHASE6_KERNEL_TUNING.md for the measured matrices and runner commands.
 
+The Phase 8 ISA admission study retained compiler-generated Comba MAD: the
+current explicit AMDGCN MUL/carry candidate was 17-21% slower on MI355X despite
+using fewer registers. Run
+`python3 scripts/benchmark/run_phase8_isa_gate.py --preset mi355x` to repeat the
+correctness, primitive-performance, and disassembly gate. See
+docs/PHASE8_AMD_ISA_GATE.md for the thresholds and MI300X validation status.
+
 
 <b>Command line parameters:</b>
 
