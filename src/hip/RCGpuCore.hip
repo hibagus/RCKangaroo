@@ -82,6 +82,10 @@
     *((int4*)&(ptr)[BLOCK_SIZE * 4 * Kparams.BlockCnt * (group)]) = *((int4*)&(src)[0]); \
     *((int4*)&(ptr)[BLOCK_SIZE * 4 * Kparams.BlockCnt * (group) + 2]) = *((int4*)&(src)[2]); }
 
+// KernelA carries the per-group loop-escape flags in a single u32 (L1S2), so the
+// group count cannot exceed 32.
+static_assert(PNT_GROUP_CNT <= 32, "PNT_GROUP_CNT must fit in L1S2's u32 bitmask");
+
 extern __shared__ u64 LDS[];
 
 // Jump-table reads. The two tables are read in separate branches so each keeps a

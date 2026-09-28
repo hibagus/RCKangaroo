@@ -46,7 +46,9 @@ static int GetBlocksPerCU()
 	static int cached = -1;
 	if (cached < 0)
 	{
-		cached = 2;
+		// 3 measured best on MI300X: 2 -> 9444, 3 -> 9599 MKeys/s at
+		// PNT_GROUP_CNT=32. Beyond 3 the extra workgroups cannot co-reside.
+		cached = 3;
 		const char* e = getenv("RCK_BLOCKS_PER_CU");
 		if (e)
 		{
