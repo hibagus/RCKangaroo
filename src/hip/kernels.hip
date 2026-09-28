@@ -36,7 +36,7 @@ __global__ void KernelA(const TKparams Kparams)
 	u64* L2y = L2x + PartStride / 8;
 	u64* L2s = L2y + PartStride / 8;
 	//list of distances of performed jumps for KernelB
-	u16* jlist = (u16*)(Kparams.JumpsList + (u64)BLOCK_X * (STEP_CNT + MD_LEN) * PNT_GROUP_CNT * BLOCK_SIZE / 4); //one rec is 2b so u64(8)/4=2
+	u16* jlist = (u16*)(Kparams.JumpsList + (u64)BLOCK_X * (Kparams.iter_cnt + MD_LEN) * PNT_GROUP_CNT * BLOCK_SIZE / 4); //one rec is 2b so u64(8)/4=2
 	jlist += THREAD_X;
 	//list of last visited points for KernelC
 	u64* x_last0 = Kparams.LastPnts + 4 * (THREAD_X + BLOCK_SIZE * BLOCK_X);
@@ -286,7 +286,7 @@ __global__ void KernelB(const TKparams Kparams)
 		i += BLOCK_SIZE;
 	}
 
-	u32* jlist0 = (u32*)(Kparams.JumpsList + (u64)BLOCK_X * (STEP_CNT + MD_LEN) * PNT_GROUP_CNT * BLOCK_SIZE / 4);
+	u32* jlist0 = (u32*)(Kparams.JumpsList + (u64)BLOCK_X * (Kparams.iter_cnt + MD_LEN) * PNT_GROUP_CNT * BLOCK_SIZE / 4);
 
 	__syncthreads();
 

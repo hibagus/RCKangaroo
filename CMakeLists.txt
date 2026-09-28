@@ -139,6 +139,8 @@ if(RCK_BUILD_HIP)
         OUTPUT_NAME rckangaroo
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
     )
+
+    add_subdirectory(benchmarks)
 endif()
 
 include(CTest)
