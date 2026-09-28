@@ -78,14 +78,15 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 	Kparams.KangCnt = KangCnt;
 	Kparams.DP = DP;
 #ifdef __HIP_PLATFORM_AMD__
-	// KernelA holds both jump tables in LDS (2 x 32 KB) because selecting
-	// between address spaces would force generic flat_load addressing; see
-	// note 5 in src/hip/RCGpuCore.hip. 64 KB is CDNA3's per-workgroup limit.
+	// KernelA keeps only jmp1 in LDS; jmp2 is read from global on a separate
+	// branch so the hot path still lowers to ds_read_b128. See note 5 in
+	// src/hip/RCGpuCore.hip. Halving this from 64 KB is what lets two
+	// workgroups co-reside on a CDNA3 CU.
 	//
 	// Occupancy is pinned by amdgpu_waves_per_eu in the kernel attributes, so
 	// unlike the CUDA build there is no need to over-request LDS to force
 	// 1 block/CU - these are the real working-set sizes.
-	Kparams.KernelA_LDS_Size = 64 * 1024;
+	Kparams.KernelA_LDS_Size = 32 * 1024;
 	Kparams.KernelB_LDS_Size = 48 * 1024;
 	Kparams.KernelC_LDS_Size = 96 * JMP_CNT;
 #else

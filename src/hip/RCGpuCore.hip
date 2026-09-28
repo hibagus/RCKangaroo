@@ -11,7 +11,7 @@
 // What changed relative to the CUDA original, and why
 // ---------------------------------------------------------------------------
 //
-// 1. Field arithmetic comes from include/hip/RCGpuUtils_cdna.h, where every
+// 1. Field arithmetic comes from include/cdna/RCGpuUtils_cdna.h, where every
 //    carry chain was rebuilt because CDNA has no PTX-style sticky carry flag.
 //    Call sites are unchanged.
 //
@@ -33,23 +33,30 @@
 //    above the hardware LDS limit; the requested dynamic size is simply honoured
 //    or the launch fails.
 //
-// 5. Both jump tables live in LDS, where CUDA keeps jmp1 in shared memory and
-//    jmp2 in __constant__. That is not a tuning preference - it is forced by
-//    CDNA's address spaces. KernelA picks between the two tables per kangaroo
-//    (`jmp_table = flag ? jmp2 : jmp1`), and if the two candidates live in
-//    different address spaces the compiler has to emit generic `flat_load_dwordx4`
-//    for the read. Measured: 8 flat loads and zero ds_read in the hot loop.
-//    Flat addressing resolves the LDS-vs-global aperture at runtime and gives up
-//    the native LDS path, which is pure waste here.
+// 5. Jump-table placement is constrained by CDNA's address spaces in a way that
+//    has no CUDA analogue. KernelA picks between the jmp1 and jmp2 tables per
+//    kangaroo. If that select has to choose between two *different* address
+//    spaces, the compiler must emit generic `flat_load_dwordx4` for the read -
+//    measured at 8 flat loads and zero ds_read in the hot loop when jmp1 was in
+//    LDS and jmp2 in __constant__, as the CUDA version arranges them. Flat
+//    addressing resolves the LDS-vs-global aperture at runtime and forfeits the
+//    native LDS path.
 //
-//    Putting both tables in LDS makes every read a native ds_read_b128. The cost
-//    is 2 x 32 KB = 64 KB, exactly CDNA3's per-workgroup LDS limit - affordable
-//    only because we already want 1 workgroup/CU, so there is nothing else
-//    competing for it. CDNA4's 160 KB makes this trivially comfortable.
+//    Putting both tables in LDS fixes that, but costs 2 x 32 KB = 64 KB, which is
+//    all of CDNA3's per-CU LDS and pins the kernel to one workgroup per CU, i.e.
+//    1 wave/SIMD. Since 154 VGPRs would allow 3 waves/SIMD, LDS - not registers -
+//    was the occupancy limiter, and at 1 wave/SIMD there is no second wave to
+//    cover the 15 VMEM and 6 LDS accesses each point addition performs.
 //
-//    This also removes the separate __constant__ upload: both tables are filled
-//    straight from Kparams.Jumps1/Jumps2, reading the x,y halves and skipping
-//    each entry's 4-limb distance (which only KernelB needs).
+//    So instead: jmp1 stays in LDS (32 KB) and jmp2 is read straight from global
+//    memory, with the two reads in *separate branches* holding separately typed
+//    pointers. The compiler then keeps the LDS path as ds_read_b128 and only the
+//    rare path pays for a global load. jmp2 is used to escape level-1 size-2
+//    loops, which affect about 1 jump in 1024, so a wave64 takes the global
+//    branch roughly 6% of the time (1 - (1023/1024)^64).
+//
+//    Net: 32 KB LDS, 2 workgroups/CU, 2 waves/SIMD, and JMP_CNT stays at 512 -
+//    no increase in the loop rate, which halving JMP_CNT would have cost.
 //
 // 6. Wave64 needed no changes in the math layer: the CUDA original contains no
 //    warp intrinsics, no __shfl, no __syncwarp and no warpSize assumption. The
@@ -76,6 +83,25 @@
     *((int4*)&(ptr)[BLOCK_SIZE * 4 * Kparams.BlockCnt * (group) + 2]) = *((int4*)&(src)[2]); }
 
 extern __shared__ u64 LDS[];
+
+// Jump-table reads. The two tables are read in separate branches so each keeps a
+// concretely-typed pointer: the LDS path stays ds_read_b128 while only the rare
+// jmp2 escape path pays a global load. Writing it as a ternary select over a
+// single pointer instead makes the compiler fall back to generic flat_load for
+// both. See note 5. Strides differ - 8 in LDS (x,y packed), 12 in global (x,y
+// then a 4-limb distance only KernelB reads).
+#define LOAD_JMP_X(dst_x, ind, use2) { \
+    if (use2) { Copy_int4_x2(dst_x, jmp2_table + 12 * (ind)); } \
+    else      { Copy_int4_x2(dst_x, jmp1_table + 8 * (ind)); } }
+
+#define LOAD_JMP_XY(dst_x, dst_y, ind, use2) { \
+    if (use2) { \
+        Copy_int4_x2(dst_x, jmp2_table + 12 * (ind)); \
+        Copy_int4_x2(dst_y, jmp2_table + 12 * (ind) + 4); \
+    } else { \
+        Copy_int4_x2(dst_x, jmp1_table + 8 * (ind)); \
+        Copy_int4_x2(dst_y, jmp1_table + 8 * (ind) + 4); \
+    } }
 
 // One 256-thread workgroup per CU, 1 wave per SIMD. See note 2 above: this is
 // required for the VGPR budget, not just a throughput preference.
@@ -115,24 +141,18 @@ __global__ void KernelA(const TKparams Kparams)
     u64* x_last0 = Kparams.LastPnts + 4 * (THREAD_X + BLOCK_SIZE * BLOCK_X);
     u64* y_last0 = x_last0 + PartStride / 8;
 
-    // Both tables in LDS so the per-kangaroo select between them stays inside
-    // one address space and lowers to ds_read_b128. See note 5.
-    u64* jmp1_table = LDS;                  // 32 KB: JMP_CNT x {x[4], y[4]}
-    u64* jmp2_table = LDS + 8 * JMP_CNT;    // 32 KB, same layout
+    // Only the hot table goes to LDS - see note 5. Source stride is 12 because
+    // each entry carries a 4-limb distance after x and y; only KernelB needs
+    // those. ds_write_b128 needs 16-byte alignment, which both strides satisfy.
+    u64* jmp1_table = LDS;                      // 32 KB: JMP_CNT x {x[4], y[4]}
+    const u64* jmp2_table = Kparams.Jumps2;     // global, stride 12
 
-    // Cooperative fill. ds_write_b128 needs 16-byte alignment, which both the
-    // 8*i destination and 12*i source strides satisfy. The source stride is 12
-    // because each table entry carries a 4-limb distance after x and y; only
-    // KernelB reads those, so we skip them here.
     int i = THREAD_X;
     while (i < JMP_CNT)
     {
         #pragma unroll
         for (int k = 0; k < 8; k += 2)
-        {
             *(int4*)&jmp1_table[8 * i + k] = *(int4*)&Kparams.Jumps1[12 * i + k];
-            *(int4*)&jmp2_table[8 * i + k] = *(int4*)&Kparams.Jumps2[12 * i + k];
-        }
         i += BLOCK_SIZE;
     }
 
@@ -149,15 +169,13 @@ __global__ void KernelA(const TKparams Kparams)
     for (int step_ind = 0; step_ind < STEP_CNT; step_ind++)
     {
         __align__(16) u64 inverse[5];   // 5 limbs: InvModP works on 288 bits
-        u64* jmp_table;
         __align__(16) u64 jmp_x[4];
         __align__(16) u64 jmp_y[4];
 
         // --- forward pass: build the running product of all (x - jmp_x) ---
         LOAD_VAL_256(x, L2x, 0);
         jmp_ind = x[0] % JMP_CNT;
-        jmp_table = ((L1S2 >> 0) & 1) ? jmp2_table : jmp1_table;
-        Copy_int4_x2(jmp_x, jmp_table + 8 * jmp_ind);
+        LOAD_JMP_X(jmp_x, jmp_ind, (L1S2 >> 0) & 1);
         SubModP(inverse, x, jmp_x);
         SAVE_VAL_256(L2s, inverse, 0);
 
@@ -165,8 +183,7 @@ __global__ void KernelA(const TKparams Kparams)
         {
             LOAD_VAL_256(x, L2x, group);
             jmp_ind = x[0] % JMP_CNT;
-            jmp_table = ((L1S2 >> group) & 1) ? jmp2_table : jmp1_table;
-            Copy_int4_x2(jmp_x, jmp_table + 8 * jmp_ind);
+            LOAD_JMP_X(jmp_x, jmp_ind, (L1S2 >> group) & 1);
             SubModP(tmp, x, jmp_x);
             MulModP(inverse, inverse, tmp);
             SAVE_VAL_256(L2s, inverse, group);   // partial product for the way back
@@ -185,9 +202,7 @@ __global__ void KernelA(const TKparams Kparams)
             LOAD_VAL_256(x0, L2x, group);
             LOAD_VAL_256(y0, L2y, group);
             jmp_ind = x0[0] % JMP_CNT;
-            jmp_table = ((L1S2 >> group) & 1) ? jmp2_table : jmp1_table;
-            Copy_int4_x2(jmp_x, jmp_table + 8 * jmp_ind);
-            Copy_int4_x2(jmp_y, jmp_table + 8 * jmp_ind + 4);
+            LOAD_JMP_XY(jmp_x, jmp_y, jmp_ind, (L1S2 >> group) & 1);
 
             // Kangaroos always travel "uphill": if y is odd we jump to -P
             // instead, which halves the number of distinct jump points needed.
