@@ -7,6 +7,7 @@
 /CMakeCache.txt
 /CMakeFiles/
 /Testing/
+/profiles/
 cmake-build-*/
 *.o
 *.obj
@@ -19,4 +20,6 @@ cmake-build-*/
 *.prof
 *.csv
 *.db
+*.pyc
+__pycache__/
 RESULTS.TXT

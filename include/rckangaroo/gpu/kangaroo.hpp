@@ -8,6 +8,8 @@
 
 #include <hip/hip_runtime.h>
 
+#include <vector>
+
 #include "rckangaroo/ec.hpp"
 #include "rckangaroo/config.hpp"
 #include "rckangaroo/gpu/kernel_params.hpp"
@@ -56,10 +58,21 @@ private:
 
 	int cur_stats_ind;
 	int SpeedStats[STATS_WND_SIZE];
+	bool ProfilingEnabled = false;
+	float KernelGenMilliseconds = 0.0f;
+	std::vector<float> KernelAMilliseconds;
+	std::vector<float> KernelBMilliseconds;
+	std::vector<float> KernelCMilliseconds;
+	std::vector<float> EndToEndMKeys;
+	hipEvent_t ProfileStart = nullptr;
+	hipEvent_t ProfileAfterA = nullptr;
+	hipEvent_t ProfileAfterB = nullptr;
+	hipEvent_t ProfileAfterC = nullptr;
 
 	void GenerateRndDistances();
 	bool Start();
 	void Release();
+	void PrintProfileSummary() const;
 #ifdef DEBUG_MODE
 	int Dbg_CheckKangs();
 #endif

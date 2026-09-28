@@ -46,8 +46,9 @@ cmake --build --preset rocm-fat -j
 
 The executable is written to `build/<preset>/bin/rckangaroo`. The retained
 CUDA implementation is opt-in through `RCK_BUILD_CUDA`; it is not part of the
-default HIP path. See `docs/ROCM_PORTING_PLAN.md` and `docs/PERFORMANCE.md` for
-validation status and baseline results.
+default HIP path. See `docs/ROCM_PORTING_PLAN.md`, `docs/PROFILING.md`, and
+`docs/PERFORMANCE.md` for validation status, reproducible profiling commands,
+and baseline results.
 
 
 <b>Command line parameters:</b>

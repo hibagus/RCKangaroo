@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string_view>
 #include <vector>
 
 #include "rckangaroo/config.hpp"
@@ -12,6 +14,15 @@
 
 namespace
 {
+struct BenchmarkOptions
+{
+	int device_index = 0;
+	int warmup_ms = 1000;
+	int sample_ms = 1000;
+	int sample_count = 5;
+	u32 block_count = 0;
+};
+
 constexpr std::array<u64, 4> kGeneratorX = {
 	0x59F2815B16F81798ull, 0x029BFCDB2DCE28D9ull,
 	0x55A06295CE870B07ull, 0x79BE667EF9DCBBACull};
@@ -32,18 +43,87 @@ bool CheckHip(hipError_t status, const char* operation)
 	std::fprintf(stderr, "%s failed: %s\n", operation, hipGetErrorString(status));
 	return false;
 }
+
+bool ParseInteger(const char* text, int minimum, int* value)
+{
+	char* end = nullptr;
+	const long parsed = std::strtol(text, &end, 10);
+	if (!text[0] || *end || parsed < minimum || parsed > 1'000'000)
+		return false;
+	*value = static_cast<int>(parsed);
+	return true;
+}
+
+bool ParseOptions(int argc, char** argv, BenchmarkOptions* options)
+{
+	for (int index = 1; index < argc; ++index)
+	{
+		const std::string_view argument = argv[index];
+		if (argument == "--help")
+		{
+			std::printf("Usage: %s [device] [--device N] [--warmup-ms N] "
+				"[--sample-ms N] [--samples N] [--blocks N]\n", argv[0]);
+			return false;
+		}
+		if (index == 1 && !argument.starts_with("-"))
+		{
+			if (!ParseInteger(argv[index], 0, &options->device_index))
+				return false;
+			continue;
+		}
+		if (index + 1 >= argc)
+			return false;
+		int value = 0;
+		if (!ParseInteger(argv[index + 1], 0, &value))
+			return false;
+		if (argument == "--device")
+			options->device_index = value;
+		else if (argument == "--warmup-ms")
+			options->warmup_ms = value;
+		else if (argument == "--sample-ms" && value > 0)
+			options->sample_ms = value;
+		else if (argument == "--samples" && value > 0)
+			options->sample_count = value;
+		else if (argument == "--blocks" && value > 0)
+			options->block_count = static_cast<u32>(value);
+		else
+			return false;
+		++index;
+	}
+	return options->sample_count <= 1000;
+}
+
+double Median(std::vector<double> values)
+{
+	std::sort(values.begin(), values.end());
+	const size_t middle = values.size() / 2;
+	if (values.size() & 1)
+		return values[middle];
+	return (values[middle - 1] + values[middle]) / 2.0;
+}
 } // namespace
 
 int main(int argc, char** argv)
 {
-	const int device_index = argc > 1 ? std::atoi(argv[1]) : 0;
-	if (!CheckHip(hipSetDevice(device_index), "hipSetDevice"))
+	if (argc == 2 && std::string_view(argv[1]) == "--help")
+	{
+		std::printf("Usage: %s [device] [--device N] [--warmup-ms N] "
+			"[--sample-ms N] [--samples N] [--blocks N]\n", argv[0]);
+		return EXIT_SUCCESS;
+	}
+	BenchmarkOptions options;
+	if (!ParseOptions(argc, argv, &options))
+	{
+		std::fprintf(stderr, "Invalid benchmark arguments. Use --help for usage.\n");
+		return EXIT_FAILURE;
+	}
+	if (!CheckHip(hipSetDevice(options.device_index), "hipSetDevice"))
 		return EXIT_FAILURE;
 	hipDeviceProp_t properties{};
-	if (!CheckHip(hipGetDeviceProperties(&properties, device_index), "hipGetDeviceProperties"))
+	if (!CheckHip(hipGetDeviceProperties(&properties, options.device_index), "hipGetDeviceProperties"))
 		return EXIT_FAILURE;
 
-	const u32 block_count = properties.multiProcessorCount;
+	const u32 block_count = options.block_count ? options.block_count : properties.multiProcessorCount;
 	const u32 kangaroo_count = block_count * BLOCK_SIZE * PNT_GROUP_CNT;
 	const size_t coordinate_words = static_cast<size_t>(kangaroo_count) * 4;
 	std::vector<u64> initial_l2(static_cast<size_t>(kangaroo_count) * 12, 0);
@@ -96,9 +176,7 @@ int main(int argc, char** argv)
 		!CheckHip(SetGpuParams(params, jump_table_2.data()), "SetGpuParams"))
 		return EXIT_FAILURE;
 
-	constexpr int sample_count = 5;
-	std::array<float, sample_count> milliseconds{};
-	for (int sample = -1; sample < sample_count; ++sample)
+	auto measure_launch = [&]() -> float
 	{
 		if (!CheckHip(hipMemcpyAsync(params.L2, initial_l2.data(), l2_bytes,
 			hipMemcpyHostToDevice, stream), "hipMemcpyAsync(L2 reset)") ||
@@ -108,19 +186,74 @@ int main(int argc, char** argv)
 			!CheckHip(LaunchKernelA(params, stream), "LaunchKernelA") ||
 			!CheckHip(hipEventRecord(stop, stream), "hipEventRecord(stop)") ||
 			!CheckHip(hipEventSynchronize(stop), "hipEventSynchronize(stop)"))
+			return -1.0f;
+		float milliseconds = 0.0f;
+		if (!CheckHip(hipEventElapsedTime(&milliseconds, start, stop), "hipEventElapsedTime"))
+			return -1.0f;
+		return milliseconds;
+	};
+
+	double warmup_elapsed_ms = 0.0;
+	int warmup_launches = 0;
+	while (warmup_elapsed_ms < options.warmup_ms)
+	{
+		const float elapsed = measure_launch();
+		if (elapsed < 0.0f)
 			return EXIT_FAILURE;
-		if (sample >= 0 && !CheckHip(hipEventElapsedTime(&milliseconds[sample], start, stop),
-			"hipEventElapsedTime"))
-			return EXIT_FAILURE;
+		warmup_elapsed_ms += elapsed;
+		++warmup_launches;
 	}
 
-	std::sort(milliseconds.begin(), milliseconds.end());
-	const float median_ms = milliseconds[sample_count / 2];
-	const double mkeys_per_second = static_cast<double>(kangaroo_count) / (median_ms * 1000.0);
-	std::printf("GPU %d: %s (%s), %u CUs\n", device_index, properties.name,
+	std::vector<double> sample_mkeys;
+	std::vector<double> sample_average_ms;
+	std::vector<int> sample_launches;
+	for (int sample = 0; sample < options.sample_count; ++sample)
+	{
+		double elapsed_ms = 0.0;
+		int launches = 0;
+		while (elapsed_ms < options.sample_ms)
+		{
+			const float elapsed = measure_launch();
+			if (elapsed < 0.0f)
+				return EXIT_FAILURE;
+			elapsed_ms += elapsed;
+			++launches;
+		}
+		const double points = static_cast<double>(kangaroo_count) * launches;
+		sample_mkeys.push_back(points / (elapsed_ms * 1000.0));
+		sample_average_ms.push_back(elapsed_ms / launches);
+		sample_launches.push_back(launches);
+	}
+
+	const double median_ms = Median(sample_average_ms);
+	const double median_mkeys = Median(sample_mkeys);
+	std::vector<double> deviations;
+	deviations.reserve(sample_mkeys.size());
+	for (const double value : sample_mkeys)
+		deviations.push_back(std::abs(value - median_mkeys));
+	const double mad_mkeys = Median(deviations);
+	std::printf("GPU %d: %s (%s), %u CUs\n", options.device_index, properties.name,
 		properties.gcnArchName, block_count);
-	std::printf("KernelA portable baseline: %.3f ms, %.3f MKeys/s (%u kangaroos, one step)\n",
-		median_ms, mkeys_per_second, kangaroo_count);
+	std::printf("Geometry: %u blocks, %u threads, %u groups, %u kangaroos, 1 step\n",
+		block_count, BLOCK_SIZE, PNT_GROUP_CNT, kangaroo_count);
+	std::printf("Protocol: %d ms warm-up (%d launches), %d x %d ms samples\n",
+		options.warmup_ms, warmup_launches, options.sample_count, options.sample_ms);
+	for (int sample = 0; sample < options.sample_count; ++sample)
+		std::printf("Sample %d: %.3f MKeys/s, %.3f ms/launch, %d launches\n",
+			sample + 1, sample_mkeys[sample], sample_average_ms[sample], sample_launches[sample]);
+	std::printf("KernelA portable baseline: %.3f ms, %.3f MKeys/s median, %.3f MAD\n",
+		median_ms, median_mkeys, mad_mkeys);
+	std::printf("RCK_BENCHMARK_JSON={\"schema\":1,\"device\":%d,\"gpu\":\"%s\","
+		"\"arch\":\"%s\",\"blocks\":%u,\"threads\":%u,\"groups\":%u,"
+		"\"iterations\":1,\"kangaroos\":%u,\"warmup_ms\":%d,\"sample_ms\":%d,"
+		"\"samples\":%d,\"median_kernel_ms\":%.6f,\"median_mkeys_per_second\":%.6f,"
+		"\"mad_mkeys_per_second\":%.6f,\"sample_mkeys_per_second\":[",
+		options.device_index, properties.name, properties.gcnArchName, block_count,
+		BLOCK_SIZE, PNT_GROUP_CNT, kangaroo_count, options.warmup_ms, options.sample_ms,
+		options.sample_count, median_ms, median_mkeys, mad_mkeys);
+	for (int sample = 0; sample < options.sample_count; ++sample)
+		std::printf("%s%.6f", sample ? "," : "", sample_mkeys[sample]);
+	std::printf("]}\n");
 
 	bool passed = true;
 	passed &= CheckHip(hipEventDestroy(stop), "hipEventDestroy(stop)");

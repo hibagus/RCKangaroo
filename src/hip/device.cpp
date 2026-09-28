@@ -4,6 +4,10 @@
 // https://github.com/RetiredC
 
 
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <hip/hip_runtime.h>
 
@@ -15,12 +19,45 @@ extern bool gGenMode; //tames generation mode
 
 namespace
 {
+struct ProfileStats
+{
+	float median = 0.0f;
+	float mad = 0.0f;
+	float minimum = 0.0f;
+	float maximum = 0.0f;
+};
+
 bool CheckHip(hipError_t status, int device_index, const char* operation)
 {
 	if (status == hipSuccess)
 		return true;
 	fprintf(stderr, "GPU %d, %s failed: %s\n", device_index, operation, hipGetErrorString(status));
 	return false;
+}
+
+float Median(std::vector<float> values)
+{
+	std::sort(values.begin(), values.end());
+	const size_t middle = values.size() / 2;
+	if (values.size() & 1)
+		return values[middle];
+	return (values[middle - 1] + values[middle]) / 2.0f;
+}
+
+ProfileStats Summarize(const std::vector<float>& values)
+{
+	if (values.empty())
+		return {};
+	ProfileStats result;
+	result.median = Median(values);
+	result.minimum = *std::min_element(values.begin(), values.end());
+	result.maximum = *std::max_element(values.begin(), values.end());
+	std::vector<float> deviations;
+	deviations.reserve(values.size());
+	for (const float value : values)
+		deviations.push_back(std::abs(value - result.median));
+	result.mad = Median(deviations);
+	return result;
 }
 }
 
@@ -47,6 +84,11 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 	memset(dbg, 0, sizeof(dbg));
 	memset(SpeedStats, 0, sizeof(SpeedStats));
 	cur_stats_ind = 0;
+	KernelGenMilliseconds = 0.0f;
+	KernelAMilliseconds.clear();
+	KernelBMilliseconds.clear();
+	KernelCMilliseconds.clear();
+	EndToEndMKeys.clear();
 
 	hipError_t err = hipSetDevice(DeviceIndex);
 	if (!CheckHip(err, DeviceIndex, "hipSetDevice"))
@@ -54,6 +96,17 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 	err = hipStreamCreateWithFlags(&Stream, hipStreamNonBlocking);
 	if (!CheckHip(err, DeviceIndex, "hipStreamCreateWithFlags"))
 		return false;
+	const char* profile_environment = std::getenv("RCK_PROFILE");
+	ProfilingEnabled = profile_environment && profile_environment[0] &&
+		std::strcmp(profile_environment, "0") != 0;
+	if (ProfilingEnabled)
+	{
+		if (!CheckHip(hipEventCreate(&ProfileStart), DeviceIndex, "hipEventCreate(profile start)") ||
+			!CheckHip(hipEventCreate(&ProfileAfterA), DeviceIndex, "hipEventCreate(profile A)") ||
+			!CheckHip(hipEventCreate(&ProfileAfterB), DeviceIndex, "hipEventCreate(profile B)") ||
+			!CheckHip(hipEventCreate(&ProfileAfterC), DeviceIndex, "hipEventCreate(profile C)"))
+			return false;
+	}
 
 	Kparams.BlockCnt = mpCnt;
 	Kparams.BlockSize = BLOCK_SIZE;
@@ -351,6 +404,26 @@ void RCGpuKang::Release()
 	RCK_HIP_FREE(Jumps12)
 	RCK_HIP_FREE(JmpDists12)
 #undef RCK_HIP_FREE
+	if (ProfileAfterC)
+	{
+		CheckHip(hipEventDestroy(ProfileAfterC), DeviceIndex, "hipEventDestroy(profile C)");
+		ProfileAfterC = nullptr;
+	}
+	if (ProfileAfterB)
+	{
+		CheckHip(hipEventDestroy(ProfileAfterB), DeviceIndex, "hipEventDestroy(profile B)");
+		ProfileAfterB = nullptr;
+	}
+	if (ProfileAfterA)
+	{
+		CheckHip(hipEventDestroy(ProfileAfterA), DeviceIndex, "hipEventDestroy(profile A)");
+		ProfileAfterA = nullptr;
+	}
+	if (ProfileStart)
+	{
+		CheckHip(hipEventDestroy(ProfileStart), DeviceIndex, "hipEventDestroy(profile start)");
+		ProfileStart = nullptr;
+	}
 	if (Stream)
 	{
 		CheckHip(hipStreamDestroy(Stream), DeviceIndex, "hipStreamDestroy");
@@ -504,9 +577,23 @@ bool RCGpuKang::Start()
 		printf("GPU %d, hipMemcpy gpu_pnts failed: %s\n", DeviceIndex, hipGetErrorString(err));
 		return false;
 	}
+	if (ProfilingEnabled &&
+		!CheckHip(hipEventRecord(ProfileStart, Stream), DeviceIndex, "hipEventRecord(KernelGen start)"))
+	{
+		free(gpu_pnts);
+		return false;
+	}
 	err = LaunchKernelGen(Kparams, Stream);
 	if (!CheckHip(err, DeviceIndex, "LaunchKernelGen") ||
+		(ProfilingEnabled && !CheckHip(hipEventRecord(ProfileAfterA, Stream), DeviceIndex,
+			"hipEventRecord(KernelGen stop)")) ||
 		!CheckHip(hipStreamSynchronize(Stream), DeviceIndex, "hipStreamSynchronize(KernelGen)"))
+	{
+		free(gpu_pnts);
+		return false;
+	}
+	if (ProfilingEnabled && !CheckHip(hipEventElapsedTime(&KernelGenMilliseconds,
+		ProfileStart, ProfileAfterA), DeviceIndex, "hipEventElapsedTime(KernelGen)"))
 	{
 		free(gpu_pnts);
 		return false;
@@ -619,14 +706,25 @@ void RCGpuKang::Execute()
 		if (!CheckHip(err, DeviceIndex, "hipMemsetAsync(LoopedKangs)"))
 			break;
 
-		if (!CheckHip(LaunchKernelA(Kparams, Stream), DeviceIndex, "LaunchKernelA") ||
-			!CheckHip(LaunchKernelB(Kparams, Stream), DeviceIndex, "LaunchKernelB") ||
-			!CheckHip(LaunchKernelC(Kparams, Stream), DeviceIndex, "LaunchKernelC"))
+		if (ProfilingEnabled &&
+			!CheckHip(hipEventRecord(ProfileStart, Stream), DeviceIndex, "hipEventRecord(KernelA start)"))
 		{
 			gTotalErrors++;
 			break;
 		}
-
+		if (!CheckHip(LaunchKernelA(Kparams, Stream), DeviceIndex, "LaunchKernelA") ||
+			(ProfilingEnabled && !CheckHip(hipEventRecord(ProfileAfterA, Stream), DeviceIndex,
+				"hipEventRecord(KernelA stop)")) ||
+			!CheckHip(LaunchKernelB(Kparams, Stream), DeviceIndex, "LaunchKernelB") ||
+			(ProfilingEnabled && !CheckHip(hipEventRecord(ProfileAfterB, Stream), DeviceIndex,
+				"hipEventRecord(KernelB stop)")) ||
+			!CheckHip(LaunchKernelC(Kparams, Stream), DeviceIndex, "LaunchKernelC") ||
+			(ProfilingEnabled && !CheckHip(hipEventRecord(ProfileAfterC, Stream), DeviceIndex,
+				"hipEventRecord(KernelC stop)")))
+		{
+			gTotalErrors++;
+			break;
+		}
 		int cnt;
 		err = hipMemcpyAsync(&cnt, Kparams.DPs_out, 4, hipMemcpyDeviceToHost, Stream);
 		if (!CheckHip(err, DeviceIndex, "hipMemcpyAsync(DP count)") ||
@@ -635,13 +733,32 @@ void RCGpuKang::Execute()
 			gTotalErrors++;
 			break;
 		}
+		if (ProfilingEnabled)
+		{
+			float kernel_a_ms = 0.0f;
+			float kernel_b_ms = 0.0f;
+			float kernel_c_ms = 0.0f;
+			if (!CheckHip(hipEventElapsedTime(&kernel_a_ms, ProfileStart, ProfileAfterA),
+				DeviceIndex, "hipEventElapsedTime(KernelA)") ||
+				!CheckHip(hipEventElapsedTime(&kernel_b_ms, ProfileAfterA, ProfileAfterB),
+					DeviceIndex, "hipEventElapsedTime(KernelB)") ||
+				!CheckHip(hipEventElapsedTime(&kernel_c_ms, ProfileAfterB, ProfileAfterC),
+					DeviceIndex, "hipEventElapsedTime(KernelC)"))
+			{
+				gTotalErrors++;
+				break;
+			}
+			KernelAMilliseconds.push_back(kernel_a_ms);
+			KernelBMilliseconds.push_back(kernel_b_ms);
+			KernelCMilliseconds.push_back(kernel_c_ms);
+		}
 
 		if (cnt >= MAX_DP_CNT)
 		{
 			cnt = MAX_DP_CNT;
 			printf("GPU %d, gpu DP buffer overflow, some points lost, increase DP value!\r\n", DeviceIndex);
 		}
-		u64 pnt_cnt = (u64)KangCnt * STEP_CNT;
+		u64 pnt_cnt = (u64)KangCnt * Kparams.iter_cnt;
 
 		if (cnt)
 		{
@@ -653,7 +770,7 @@ void RCGpuKang::Execute()
 				gTotalErrors++;
 				break;
 			}
-			AddPointsToList(DPs_out, cnt, KangCnt, (u64)KangCnt * STEP_CNT, JumperInd);
+			AddPointsToList(DPs_out, cnt, KangCnt, pnt_cnt, JumperInd);
 		}
 
 		//dbg
@@ -675,6 +792,8 @@ void RCGpuKang::Execute()
 		if (!tm)
 			tm = 1;
 		int cur_speed = (int)(pnt_cnt / (tm * 1000));
+		if (ProfilingEnabled)
+			EndToEndMKeys.push_back(static_cast<float>(pnt_cnt) / (static_cast<float>(tm) * 1000.0f));
 		//printf("GPU %d kernel time %d ms, speed %d MH\r\n", DeviceIndex, (int)tm, cur_speed);
 
 		SpeedStats[cur_stats_ind] = cur_speed;
@@ -698,7 +817,37 @@ void RCGpuKang::Execute()
 
 	}
 
+	if (ProfilingEnabled)
+		PrintProfileSummary();
 	Release();
+}
+
+void RCGpuKang::PrintProfileSummary() const
+{
+	const ProfileStats kernel_a = Summarize(KernelAMilliseconds);
+	const ProfileStats kernel_b = Summarize(KernelBMilliseconds);
+	const ProfileStats kernel_c = Summarize(KernelCMilliseconds);
+	const ProfileStats end_to_end = Summarize(EndToEndMKeys);
+
+	printf("GPU %d profile: KernelGen %.3f ms; KernelA %.3f ms; KernelB %.3f ms; "
+		"KernelC %.3f ms; end-to-end %.3f MKeys/s (%zu samples)\n",
+		DeviceIndex, KernelGenMilliseconds, kernel_a.median, kernel_b.median,
+		kernel_c.median, end_to_end.median, KernelAMilliseconds.size());
+	printf("RCK_PROFILE_JSON={\"schema\":1,\"device\":%d,\"blocks\":%u,"
+		"\"threads\":%u,\"groups\":%u,\"iterations\":%u,\"kangaroos\":%u,"
+		"\"sample_count\":%zu,\"kernel_gen_ms\":%.6f,"
+		"\"kernel_a\":{\"median_ms\":%.6f,\"mad_ms\":%.6f,\"min_ms\":%.6f,\"max_ms\":%.6f},"
+		"\"kernel_b\":{\"median_ms\":%.6f,\"mad_ms\":%.6f,\"min_ms\":%.6f,\"max_ms\":%.6f},"
+		"\"kernel_c\":{\"median_ms\":%.6f,\"mad_ms\":%.6f,\"min_ms\":%.6f,\"max_ms\":%.6f},"
+		"\"end_to_end\":{\"median_mkeys_per_second\":%.6f,"
+		"\"mad_mkeys_per_second\":%.6f,\"min_mkeys_per_second\":%.6f,"
+		"\"max_mkeys_per_second\":%.6f}}\n",
+		DeviceIndex, Kparams.BlockCnt, Kparams.BlockSize, Kparams.GroupCnt,
+		Kparams.iter_cnt, Kparams.KangCnt, KernelAMilliseconds.size(), KernelGenMilliseconds,
+		kernel_a.median, kernel_a.mad, kernel_a.minimum, kernel_a.maximum,
+		kernel_b.median, kernel_b.mad, kernel_b.minimum, kernel_b.maximum,
+		kernel_c.median, kernel_c.mad, kernel_c.minimum, kernel_c.maximum,
+		end_to_end.median, end_to_end.mad, end_to_end.minimum, end_to_end.maximum);
 }
 
 void RCGpuKang::ToRestartKangaroo(int KangInd)

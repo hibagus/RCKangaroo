@@ -1,6 +1,6 @@
 # RCKangaroo ROCm Porting and Optimization Plan
 
-Status: Phase 2 complete; Phase 3 is next
+Status: Phase 3 complete; Phase 4 is next
 Last updated: 2026-09-28
 Targets: AMD Instinct MI300X (`gfx942`, CDNA3) and MI355X (`gfx950`, CDNA4)
 
@@ -108,6 +108,7 @@ RCKangaroo/
 ├── docs/
 │   ├── ROCM_PORTING_PLAN.md
 │   ├── PORTING.md
+│   ├── PROFILING.md
 │   ├── PERFORMANCE.md
 │   └── *.pdf
 └── legacy/cuda/
@@ -270,6 +271,25 @@ Exit criteria:
 - A reproducible baseline profile exists for every hot kernel.
 - Benchmark output contains enough metadata to reproduce the run.
 - Before/after profiler comparisons can be generated automatically.
+
+Completion record (2026-09-28):
+
+- Added opt-in HIP-event timing for KernelGen/A/B/C and end-to-end throughput;
+  normal runs retain the event-free path.
+- Added fixed-duration warm-up/sample automation with JSON records for Git,
+  ROCm/compiler, GPU identity, workload, launch geometry, clock, power,
+  temperature, memory, median, and MAD.
+- Captured an MI355X baseline for all hot kernels with rocprofv3 dispatch,
+  memory-copy, and scratch-allocation traces.
+- Added code-object extraction, compiler resource parsing, categorized ISA
+  counts, full disassembly archives, and automatic before/after comparisons.
+- Added a rocprof-compute preflight wrapper. The current system installation is
+  missing its pinned Python dependencies, so hardware-counter collection is
+  explicitly diagnosed rather than silently skipped or partially recorded.
+- Documented the protocol and current results in [PROFILING.md](PROFILING.md)
+  and [PERFORMANCE.md](PERFORMANCE.md).
+- MI300X remains compile/ISA-extraction only until the workflow is run on real
+  `gfx942` hardware.
 
 ### Phase 4: Optimize secp256k1 field arithmetic
 
@@ -503,13 +523,16 @@ Record major choices here as implementation progresses.
 | 2026-09-28 | Use 32 KiB, 48 KiB, and 48 KiB of dynamic LDS for portable Kernels A, B, and C. | These are the tables actually accessed by the generic kernels and all fit the MI300X 64 KiB limit. |
 | 2026-09-28 | Use fixed-exponent Fermat inversion in the initial portable field layer. | It is simple, target-independent, and passed independent GPU field tests; inversion optimization remains explicit Phase 4/5 work. |
 | 2026-09-28 | Keep long solver vectors opt-in with `RCK_ENABLE_SLOW_GPU_TESTS`. | Each vector allocates about 4.7 GiB and took 25–32 seconds on the current MI355X baseline. |
+| 2026-09-28 | Make HIP-event timing opt-in through `RCK_PROFILE`. | It preserves the normal execution path while providing machine-readable per-kernel timing during controlled runs. |
+| 2026-09-28 | Use fixed-duration samples and median/MAD as the comparison baseline. | The old cold single-launch result varied with GPU clock state and understated warmed throughput. |
+| 2026-09-28 | Retain both compiler metadata and profiler allocation counts. | Static register demand and allocation-granularity counts differ but are independently useful for occupancy work. |
 
 ## 10. Progress checklist
 
 - [x] Phase 0: deterministic correctness oracle
 - [x] Phase 1: repository reorganization
 - [x] Phase 2: portable HIP baseline
-- [ ] Phase 3: repeatable profiling
+- [x] Phase 3: repeatable profiling
 - [ ] Phase 4: optimized field arithmetic
 - [ ] Phase 5: wave64 inversion design
 - [ ] Phase 6: per-architecture kernel tuning
