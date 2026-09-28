@@ -469,6 +469,8 @@ void EcInt::SubModP(EcInt& val)
 //assume value < P
 void EcInt::NegModP()
 {
+	if (IsZero())
+		return;
 	Neg();
 	Add(g_P);
 }
@@ -530,7 +532,7 @@ void EcInt::MulModP(EcInt& val)
 	c = _addcarry_u64(c, buff[1], h, data + 1);
 	c = _addcarry_u64(c, 0, buff[2], data + 2);
 	data[4] = _addcarry_u64(c, buff[3], 0, data + 3);
-	while (data[4])
+	while (data[4] || !IsLessThanU(g_P))
 		Sub(g_P);
 }
 

@@ -1,0 +1,18 @@
+[
+  {
+    "name": "range32-private-2",
+    "range_bits": 32,
+    "dp_bits": 14,
+    "start_hex": "0",
+    "public_key_compressed": "02C6047F9441ED7D6D3045406E95C07CD85C778E4B8CEF3CA7ABAC09B95C709EE5",
+    "expected_private_key_hex": "2"
+  },
+  {
+    "name": "range32-offset-private-3",
+    "range_bits": 32,
+    "dp_bits": 14,
+    "start_hex": "1",
+    "public_key_compressed": "02F9308A019258C31049344F85F89D5229B531C845836F99B08601F113BCE036F9",
+    "expected_private_key_hex": "3"
+  }
+]

@@ -82,7 +82,7 @@ struct TKparams
 	u32 BlockSize;
 	u32 GroupCnt;
 	u64 DP;
-	bool IsGenMode; //tames generation mode
+	u32 IsGenMode; //tames generation mode; fixed-width for host/device ABI
 	u32 KernelA_LDS_Size;
 	u32 KernelB_LDS_Size;
 	u32 KernelC_LDS_Size;

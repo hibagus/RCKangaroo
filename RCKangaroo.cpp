@@ -13,6 +13,7 @@
 #include "defs.h"
 #include "utils.h"
 #include "GpuKang.h"
+#include "rckangaroo/runtime_options.hpp"
 
 
 EcJMP EcJumps1[JMP_CNT];
@@ -40,7 +41,7 @@ EcPoint gPntToSolve;
 EcInt gPrivKey;
 
 volatile u64 TotalOps;
-u32 TotalSolved;
+u64 TotalSolved;
 u32 gTotalErrors;
 volatile u64 PntTotalOps;
 bool IsBench;
@@ -55,6 +56,17 @@ char gTamesFileName[1024];
 double gMax;
 bool gGenMode; //tames generation mode
 bool gIsOpsLimit;
+rckangaroo::RuntimeOptions gRuntimeOptions;
+u64 gRunSeed;
+u64 gSolveIndex;
+u64 gRunStart;
+bool gIsDurationLimit;
+bool IsDurationLimitReached()
+{
+	if (!gRuntimeOptions.duration_seconds || !gRunStart)
+		return false;
+	return (GetTickCount64() - gRunStart) / 1000 >= gRuntimeOptions.duration_seconds;
+}
 
 #pragma pack(push, 1)
 struct DBRec
@@ -422,7 +434,7 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 		EcJumps3[i].dist.data[0] &= 0xFFFFFFFFFFFFFFFE; //must be even
 		EcJumps3[i].p = ec.MultiplyG(EcJumps3[i].dist);
 	}
-	SetRndSeed(GetTickCount64());
+	SetRndSeed(rckangaroo::DeriveSeed(gRunSeed, gSolveIndex, 1));
 
 	Int_HalfRange.Set(1);
 	Int_HalfRange.ShiftLeft(Range - 1);
@@ -464,6 +476,12 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 	while (!gSolved)
 	{
 		CheckNewPoints();
+		if (IsDurationLimitReached())
+		{
+			gIsDurationLimit = true;
+			printf("Duration limit reached\r\n");
+			break;
+		}
 		Sleep(10);
 		if (GetTickCount64() - tm_stats > 10 * 1000)
 		{
@@ -493,7 +511,7 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 #endif
 	}
 
-	if (gIsOpsLimit)
+	if (gIsOpsLimit || gIsDurationLimit)
 	{
 		if (gGenMode)
 		{
@@ -607,8 +625,20 @@ bool ParseCommandLine(int argc, char* argv[])
 		}
 		else
 		{
-			printf("error: unknown option %s\r\n", argument);
-			return false;
+			std::string error;
+			const rckangaroo::RuntimeOptionParseResult result =
+				rckangaroo::ParseRuntimeOption(argument, argc, argv, ci,
+					gRuntimeOptions, error);
+			if (result == rckangaroo::RuntimeOptionParseResult::error)
+			{
+				printf("error: %s\r\n", error.c_str());
+				return false;
+			}
+			if (result == rckangaroo::RuntimeOptionParseResult::not_runtime_option)
+			{
+				printf("error: unknown option %s\r\n", argument);
+				return false;
+			}
 		}
 	}
 	if (!gPubKey.x.IsZero())
@@ -625,6 +655,11 @@ bool ParseCommandLine(int argc, char* argv[])
 			return false;
 		}
 		gGenMode = true;
+	}
+	if (gRuntimeOptions.benchmark_iterations && (!gPubKey.x.IsZero() || gGenMode))
+	{
+		printf("error: --iterations is only valid in benchmark mode\r\n");
+		return false;
 	}
 	return true;
 }
@@ -653,7 +688,6 @@ int main(int argc, char* argv[])
 #endif
 
 	InitEc();
-	SetRndSeed(GetTickCount64());
 	gDP = 0;
 	gRange = 0;
 	gStartSet = false;
@@ -661,9 +695,24 @@ int main(int argc, char* argv[])
 	gMax = 0.0;
 	gGenMode = false;
 	gIsOpsLimit = false;
+	gIsDurationLimit = false;
+	gRunStart = 0;
+	gSolveIndex = 0;
+	gRuntimeOptions = {};
 	memset(gGPUs_Mask, 1, sizeof(gGPUs_Mask));
 	if (!ParseCommandLine(argc, argv))
 		return 0;
+
+	gRunSeed = gRuntimeOptions.seed_specified ? gRuntimeOptions.seed : GetTickCount64();
+	SetRndSeed(gRunSeed);
+	printf("Run seed: %llu%s\r\n", (unsigned long long)gRunSeed,
+		gRuntimeOptions.seed_specified ? " (requested)" : " (generated)");
+	if (gRuntimeOptions.benchmark_iterations)
+		printf("Benchmark iterations: %llu\r\n",
+			(unsigned long long)gRuntimeOptions.benchmark_iterations);
+	if (gRuntimeOptions.duration_seconds)
+		printf("Run duration limit: %llu seconds\r\n",
+			(unsigned long long)gRuntimeOptions.duration_seconds);
 
 	InitGpus();
 
@@ -679,6 +728,7 @@ int main(int argc, char* argv[])
 	TotalSolved = 0;
 	gTotalErrors = 0;
 	IsBench = gPubKey.x.IsZero();
+	gRunStart = GetTickCount64();
 
 	if (!IsBench && !gGenMode)
 	{
@@ -707,7 +757,7 @@ int main(int argc, char* argv[])
 
 		if (!SolvePoint(PntToSolve, gRange, gDP, &pk_found))
 		{
-			if (!gIsOpsLimit)
+			if (!gIsOpsLimit && !gIsDurationLimit)
 				printf("FATAL ERROR: SolvePoint failed\r\n");
 			goto label_end;
 		}
@@ -748,6 +798,18 @@ int main(int argc, char* argv[])
 		{
 			EcInt pk, pk_found;
 			EcPoint PntToSolve;
+			if (gRuntimeOptions.benchmark_iterations &&
+				TotalSolved >= gRuntimeOptions.benchmark_iterations)
+			{
+				printf("Benchmark iteration limit reached\r\n");
+				break;
+			}
+			if (IsDurationLimitReached())
+			{
+				gIsDurationLimit = true;
+				printf("Duration limit reached\r\n");
+				break;
+			}
 
 			if (!gRange)
 				gRange = 78;
@@ -757,13 +819,14 @@ int main(int argc, char* argv[])
 			x32.Set(1);
 			x32.ShiftLeft(gRange - 5);
 			//generate random pk
+			SetRndSeed(rckangaroo::DeriveSeed(gRunSeed, gSolveIndex, 0));
 			pk.RndBits(gRange);
 			pk.Add(x32); //for smooth edges
 			PntToSolve = ec.MultiplyG(pk);
 
 			if (!SolvePoint(PntToSolve, gRange, gDP, &pk_found))
 			{
-				if (!gIsOpsLimit)
+				if (!gIsOpsLimit && !gIsDurationLimit)
 					printf("FATAL ERROR: SolvePoint failed\r\n");
 				break;
 			}
@@ -776,9 +839,10 @@ int main(int argc, char* argv[])
 			}
 			TotalOps += PntTotalOps;
 			TotalSolved++;
+			gSolveIndex++;
 			u64 ops_per_pnt = TotalOps / TotalSolved;
 			double K = (double)ops_per_pnt / pow(2.0, gRange / 2.0);
-			printf("Points solved: %d, average K: %.3f (with DP and GPU overheads)\r\n", TotalSolved, K);
+			printf("Points solved: %llu, average K: %.3f (with DP and GPU overheads)\r\n", (unsigned long long)TotalSolved, K);
 			//if (TotalSolved >= 100) break; //dbg
 		}
 	}

@@ -4,7 +4,7 @@
 // https://github.com/RetiredC
 
 
-#include "defs.h"
+#include "rckangaroo/kernel_params_abi.hpp"
 #include "RCGpuUtils.h"
 
 //imp2 table points for KernelA

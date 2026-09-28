@@ -43,6 +43,12 @@ Discussion thread: https://bitcointalk.org/index.php?topic=5517607
 
 <b>-tames</b>		filename with tames. If file not found, software generates tames (option "-max" is required) and saves them to the file. If the file is found, software loads tames to speedup solving. 
 
+<b>--seed</b>		unsigned 64-bit seed for reproducible benchmark keys and GPU initialization. The generated seed is printed when this option is omitted. The legacy-style alias "-seed" is also accepted.
+
+<b>--iterations</b>	maximum number of random keys to solve in benchmark mode. The legacy-style alias "-iterations" is also accepted.
+
+<b>--duration</b>	maximum run duration in seconds. An active solve is stopped cleanly when the deadline is reached. The legacy-style alias "-duration" is also accepted.
+
 When public key is solved, software displays it and also writes it to "RESULTS.TXT" file. 
 
 Sample command line for puzzle #85:
@@ -52,6 +58,10 @@ RCKangaroo.exe -dp 16 -range 84 -start 1000000000000000000000 -pubkey 0329c4574a
 Sample command to generate tames:
 
 RCKangaroo.exe -dp 16 -range 76 -tames tames76.dat -max 10
+
+Sample reproducible finite benchmark:
+
+RCKangaroo.exe -range 78 -dp 16 --seed 12345 --iterations 5 --duration 600
 
 Then you can restart software with same parameters to see less K in benchmark mode or add "-tames tames76.dat" to solve some public key in 76-bit range faster.
 
@@ -94,4 +104,4 @@ v1.1:
 
 v1.0:
 
-- initial release.
+- initial release.
