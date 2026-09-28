@@ -144,7 +144,7 @@ void InitGpus()
 		GpuKangs[GpuCnt]->DeviceIndex = i;
 		GpuKangs[GpuCnt]->mpCnt = deviceProp.multiProcessorCount;
 		GpuKangs[GpuCnt]->JumperInd = GpuCnt;
-		printf("GPU %d: portable HIP kernel path enabled.\r\n", i);
+		printf("GPU %d: native HIP kernel path enabled.\r\n", i);
 		GpuCnt++;
 	}
 	printf("Total GPUs for work: %d\r\n", GpuCnt);

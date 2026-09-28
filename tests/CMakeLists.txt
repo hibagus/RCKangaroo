@@ -77,6 +77,21 @@ if(RCK_BUILD_HIP)
     add_test(NAME rckangaroo.gpu.field COMMAND rckangaroo_gpu_field_tests)
     set_tests_properties(rckangaroo.gpu.field PROPERTIES LABELS "gpu;hip")
 
+	add_executable(rckangaroo_gpu_field_variant_tests gpu/field_variant_tests.hip)
+	target_include_directories(rckangaroo_gpu_field_variant_tests PRIVATE
+		"${PROJECT_SOURCE_DIR}/src/hip"
+	)
+	target_link_libraries(rckangaroo_gpu_field_variant_tests PRIVATE
+		RCKangaroo::core
+		Boost::headers
+	)
+	set_target_properties(rckangaroo_gpu_field_variant_tests PROPERTIES
+		HIP_ARCHITECTURES "${RCK_HIP_ARCHITECTURES}"
+	)
+
+	add_test(NAME rckangaroo.gpu.field_variants COMMAND rckangaroo_gpu_field_variant_tests)
+	set_tests_properties(rckangaroo.gpu.field_variants PROPERTIES LABELS "gpu;hip")
+
 	add_executable(rckangaroo_gpu_kernel_tests gpu/kernel_tests.hip)
 	target_link_libraries(rckangaroo_gpu_kernel_tests PRIVATE
 		RCKangaroo::hip_backend

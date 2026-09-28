@@ -264,36 +264,3 @@ __device__ __forceinline__ void Subtract192(u64* result, const u64* value)
 	(dst)[0] = (src)[0]; (dst)[1] = (src)[1]; (dst)[2] = (src)[2]; (dst)[3] = (src)[3]; }
 #define Copy_u64_x4(dst, src) Copy_int4_x2((dst), (src))
 #define st_cs_b16(addr, val) (*(addr) = static_cast<u16>(val))
-
-__device__ __forceinline__ void AddModP(u64* result, const u64* lhs, const u64* rhs)
-{
-	rckangaroo::hip_field::Add(reinterpret_cast<u32*>(result),
-		reinterpret_cast<const u32*>(lhs), reinterpret_cast<const u32*>(rhs));
-}
-
-__device__ __forceinline__ void SubModP(u64* result, const u64* lhs, const u64* rhs)
-{
-	rckangaroo::hip_field::Subtract(reinterpret_cast<u32*>(result),
-		reinterpret_cast<const u32*>(lhs), reinterpret_cast<const u32*>(rhs));
-}
-
-__device__ __forceinline__ void NegModP(u64* value)
-{
-	rckangaroo::hip_field::Negate(reinterpret_cast<u32*>(value));
-}
-
-__device__ __forceinline__ void MulModP(u64* result, const u64* lhs, const u64* rhs)
-{
-	rckangaroo::hip_field::Multiply(reinterpret_cast<u32*>(result),
-		reinterpret_cast<const u32*>(lhs), reinterpret_cast<const u32*>(rhs));
-}
-
-__device__ __forceinline__ void SqrModP(u64* result, const u64* value)
-{
-	MulModP(result, value, value);
-}
-
-__device__ __forceinline__ void InvModP(u32* value)
-{
-	rckangaroo::hip_field::Invert(value);
-}

@@ -31,9 +31,10 @@ AMD SMI samples. This makes loaded clocks and power visible instead of relying
 only on idle readings before and after a run.
 
 The default range-139 public-key workload is copied from `launch_kangaroo` and
-uses seed 1. On the current portable MI355X path, KernelGen takes about 37
-seconds before the steady-state loop starts. For that reason, the default
-solver warm-up is 60 seconds and each sample is 90 seconds. The runner rejects
+uses seed 1. The Phase 3 portable MI355X baseline took about 37 seconds in
+KernelGen before the steady-state loop. Phase 4 reduced that to about 1.5
+seconds, but the default 60-second warm-up and 90-second samples are retained
+for controlled comparisons. The runner rejects
 a sample that does not complete a KernelA/B/C iteration. A shorter diagnostic
 run can omit the solver portion:
 
@@ -70,6 +71,15 @@ instruction mix with:
 python3 scripts/profile/extract_code_object.py --preset mi355x
 python3 scripts/profile/extract_code_object.py --preset mi300x
 ```
+
+Phase 4 field candidates have their own kernel-per-variant extractor:
+
+```sh
+python3 scripts/profile/extract_field_variants.py --preset mi355x
+python3 scripts/profile/extract_field_variants.py --preset mi300x
+```
+
+It additionally counts the selected MAD, MUL, and VCC carry instructions.
 
 `resources.json` reports compiler metadata for every hot kernel, including
 VGPR, SGPR, AGPR, spills, private memory, static/dynamic LDS, wave size, and

@@ -104,3 +104,12 @@ object. KernelGen's 36.9-second startup and 48-byte private segment, followed by
 KernelA's steady-state cost and register pressure, are the first Phase 4
 optimization priorities. See [PROFILING.md](PROFILING.md) for the artifact and
 comparison workflow. No MI300X runtime result has been measured.
+
+## Phase 4 optimized field arithmetic
+
+The selected Comba-MAD and fixed addition-chain implementation increased the
+warmed MI355X KernelA result from 244.983 to 3,361.798 MKeys/s. A shorter
+profiled solver diagnostic reached 3,836.254 MKeys/s and reduced KernelGen from
+about 36.9 seconds to 1.50 seconds. See
+[PHASE4_FIELD_ARITHMETIC.md](PHASE4_FIELD_ARITHMETIC.md) for the candidate
+matrix, protocol, resource tables, correctness gates, and MI300X limitation.

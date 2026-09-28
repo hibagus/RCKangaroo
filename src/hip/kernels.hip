@@ -7,7 +7,7 @@
 #include "rckangaroo/gpu/kernel_params_abi.hpp"
 #include "rckangaroo/gpu/kernels.hpp"
 #include "rckangaroo/config.hpp"
-#include "field/portable.hpp"
+#include "field/api.hpp"
 
 //imp2 table points for KernelA
 __device__ __constant__ u64 jmp2_table[8 * JMP_CNT];

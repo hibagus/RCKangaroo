@@ -1,6 +1,6 @@
 # RCKangaroo ROCm Porting and Optimization Plan
 
-Status: Phase 3 complete; Phase 4 is next
+Status: Phase 4 complete on `gfx950`; `gfx942` runtime validation is pending
 Last updated: 2026-09-28
 Targets: AMD Instinct MI300X (`gfx942`, CDNA3) and MI355X (`gfx950`, CDNA4)
 
@@ -321,6 +321,29 @@ Exit criteria:
 - Winning multiplication, squaring, and inversion variants are selected independently for `gfx942` and `gfx950`.
 - Generated ISA and resource usage are archived with the benchmark result.
 
+Implementation checkpoint (2026-09-28), with measurements in
+[PHASE4_FIELD_ARITHMETIC.md](PHASE4_FIELD_ARITHMETIC.md):
+
+- Separated the production API, portable reference arithmetic, and candidate
+  implementations under `src/hip/field/`.
+- Added compiler-generated Comba, explicit AMDGCN multiply/carry, and single-block
+  `V_ADD_CO_U32`/`V_ADDC_CO_U32` carry-chain variants with portable fallbacks.
+- Added a fixed `p - 2` addition chain using 255 squarings and 15 multiplies.
+- Added 4,096-vector randomized arithmetic tests and 256-vector inversion tests
+  against a Boost.Multiprecision oracle. Both known-key end-to-end tests pass.
+- On MI355X, selected compiler-generated Comba MAD for multiply/square and the
+  same backend with the fixed addition chain for inversion. It was faster than
+  explicit assembly and introduced no spills in the integrated hot kernels.
+- Archived standalone and integrated `gfx942`/`gfx950` code-object metadata and
+  disassembly under ignored `profiles/phase4-*` directories. The two targets
+  currently produce matching field-kernel instruction/resource summaries.
+
+The `gfx950` exit criteria are satisfied. The `gfx942` code compiles and is
+spill-free, but its winner remains provisional until the same correctness and
+benchmark protocol is run on physical MI300X hardware. Per-lane and wave64
+batching remain Phase 5 architecture work rather than prerequisites for this
+field-arithmetic checkpoint.
+
 ### Phase 5: Redesign inversion for wave64
 
 The NVIDIA inversion-worker topology must be reconsidered, not copied. Benchmark:
@@ -526,6 +549,7 @@ Record major choices here as implementation progresses.
 | 2026-09-28 | Make HIP-event timing opt-in through `RCK_PROFILE`. | It preserves the normal execution path while providing machine-readable per-kernel timing during controlled runs. |
 | 2026-09-28 | Use fixed-duration samples and median/MAD as the comparison baseline. | The old cold single-launch result varied with GPU clock state and understated warmed throughput. |
 | 2026-09-28 | Retain both compiler metadata and profiler allocation counts. | Static register demand and allocation-granularity counts differ but are independently useful for occupancy work. |
+| 2026-09-28 | Select compiler-generated Comba MAD and fixed addition-chain inversion on `gfx950`; keep explicit assembly as a measured fallback. | Comba MAD was 13.1x faster for multiply and its chain inversion was 24.6x faster than the portable baseline; explicit MUL/carry assembly was slower. |
 
 ## 10. Progress checklist
 
@@ -533,7 +557,7 @@ Record major choices here as implementation progresses.
 - [x] Phase 1: repository reorganization
 - [x] Phase 2: portable HIP baseline
 - [x] Phase 3: repeatable profiling
-- [ ] Phase 4: optimized field arithmetic
+- [ ] Phase 4: optimized field arithmetic (`gfx950` complete; `gfx942` runtime pending)
 - [ ] Phase 5: wave64 inversion design
 - [ ] Phase 6: per-architecture kernel tuning
 - [ ] Phase 7: host and multi-GPU optimization
