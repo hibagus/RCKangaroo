@@ -20,3 +20,16 @@ target_link_libraries(rckangaroo_field_benchmark PRIVATE
 set_target_properties(rckangaroo_field_benchmark PROPERTIES
 	HIP_ARCHITECTURES "${RCK_HIP_ARCHITECTURES}"
 )
+
+add_executable(rckangaroo_wave64_inverse_benchmark EXCLUDE_FROM_ALL
+	wave64_inverse_benchmark.hip
+)
+target_include_directories(rckangaroo_wave64_inverse_benchmark PRIVATE
+	"${PROJECT_SOURCE_DIR}/src/hip"
+)
+target_link_libraries(rckangaroo_wave64_inverse_benchmark PRIVATE
+	RCKangaroo::core
+)
+set_target_properties(rckangaroo_wave64_inverse_benchmark PROPERTIES
+	HIP_ARCHITECTURES "${RCK_HIP_ARCHITECTURES}"
+)

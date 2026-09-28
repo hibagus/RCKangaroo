@@ -81,6 +81,19 @@ python3 scripts/profile/extract_field_variants.py --preset mi300x
 
 It additionally counts the selected MAD, MUL, and VCC carry instructions.
 
+Phase 5's per-lane versus wave64 inversion comparison uses the same extractor
+with a suite selector. The benchmark wrapper records metadata and invokes the
+extractor automatically:
+
+```sh
+python3 scripts/benchmark/run_wave64_inversion.py --preset mi355x --device 0
+python3 scripts/profile/extract_field_variants.py --preset mi300x --suite wave64
+```
+
+The wave64 suite additionally counts `ds_bpermute_b32` wave shuffles. See
+[PHASE5_WAVE64_INVERSION.md](PHASE5_WAVE64_INVERSION.md) for the result and
+selection decision.
+
 `resources.json` reports compiler metadata for every hot kernel, including
 VGPR, SGPR, AGPR, spills, private memory, static/dynamic LDS, wave size, and
 maximum workgroup size. `instruction_mix.json` classifies the generated ISA as

@@ -113,3 +113,12 @@ profiled solver diagnostic reached 3,836.254 MKeys/s and reduced KernelGen from
 about 36.9 seconds to 1.50 seconds. See
 [PHASE4_FIELD_ARITHMETIC.md](PHASE4_FIELD_ARITHMETIC.md) for the candidate
 matrix, protocol, resource tables, correctness gates, and MI300X limitation.
+
+## Phase 5 wave64 inversion study
+
+A wave64-cooperative Montgomery batch was correct but slower than the selected
+per-lane fixed addition chain on MI355X: 0.107435 versus 0.275659
+Ginversion/s, or 0.390x the rate. It also introduced eight VGPR spills. The
+production `KernelA` therefore remains on per-lane inversion. See
+[PHASE5_WAVE64_INVERSION.md](PHASE5_WAVE64_INVERSION.md) for the algorithm,
+benchmark protocol, ISA evidence, and MI300X validation status.

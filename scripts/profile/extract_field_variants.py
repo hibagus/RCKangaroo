@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Archive code objects, ISA, and resources for Phase 4 field kernels."""
+"""Archive code objects, ISA, and resources for field and wave64 candidates."""
 
 from __future__ import annotations
 
@@ -26,6 +26,11 @@ FIELD_KERNELS = (
     "FieldInverseChainCombaExplicit",
 )
 
+WAVE64_KERNELS = (
+    "InversePerLane",
+    "InverseWave64",
+)
+
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -33,10 +38,12 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, help="exact output directory")
     parser.add_argument("--output-root", type=Path, default=ROOT / "profiles")
     parser.add_argument("--skip-build", action="store_true")
+    parser.add_argument("--suite", choices=("field", "wave64"), default="field")
     return parser.parse_args()
 
 
-def parse_metadata(notes: str, code_object: str) -> list[dict[str, object]]:
+def parse_metadata(notes: str, code_object: str,
+                   kernels: tuple[str, ...]) -> list[dict[str, object]]:
     keys = {
         ".sgpr_count": "sgpr_count",
         ".vgpr_count": "vgpr_count",
@@ -52,7 +59,7 @@ def parse_metadata(notes: str, code_object: str) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     for block in re.split(r"(?m)^  - (?=\.agpr_count:)", notes):
         name_match = re.search(r"(?m)^\s*\.name:\s*'?([^'\s]+)'?", block)
-        if not name_match or name_match.group(1) not in FIELD_KERNELS:
+        if not name_match or name_match.group(1) not in kernels:
             continue
         record: dict[str, object] = {
             "kernel": name_match.group(1),
@@ -66,13 +73,14 @@ def parse_metadata(notes: str, code_object: str) -> list[dict[str, object]]:
     return records
 
 
-def parse_instruction_mix(disassembly: str, code_object: str) -> list[dict[str, object]]:
-    mixes = {kernel: Counter() for kernel in FIELD_KERNELS}
+def parse_instruction_mix(disassembly: str, code_object: str,
+                          kernels: tuple[str, ...]) -> list[dict[str, object]]:
+    mixes = {kernel: Counter() for kernel in kernels}
     current: str | None = None
     for line in disassembly.splitlines():
         label = re.search(r"<([^>]+)>:$", line)
         if label:
-            current = label.group(1) if label.group(1) in FIELD_KERNELS else None
+            current = label.group(1) if label.group(1) in kernels else None
             continue
         if current is None:
             continue
@@ -95,7 +103,7 @@ def parse_instruction_mix(disassembly: str, code_object: str) -> list[dict[str, 
             mixes[current]["other"] += 1
         for selected in (
             "v_mad_u64_u32", "v_mul_lo_u32", "v_mul_hi_u32",
-            "v_add_co_u32", "v_addc_co_u32",
+            "v_add_co_u32", "v_addc_co_u32", "ds_bpermute_b32",
         ):
             if mnemonic.startswith(selected):
                 mixes[current][selected] += 1
@@ -117,17 +125,29 @@ def write_csv(path: Path, rows: list[dict[str, object]]) -> None:
 
 def main() -> int:
     args = parse_arguments()
+    if args.suite == "field":
+        kernels = FIELD_KERNELS
+        build_target = "rckangaroo_field_benchmark"
+        object_directory = "rckangaroo_field_benchmark.dir"
+        object_name = "field_ops_benchmark.hip.o"
+        output_prefix = "field-isa"
+    else:
+        kernels = WAVE64_KERNELS
+        build_target = "rckangaroo_wave64_inverse_benchmark"
+        object_directory = "rckangaroo_wave64_inverse_benchmark.dir"
+        object_name = "wave64_inverse_benchmark.hip.o"
+        output_prefix = "wave64-isa"
     output = args.output.resolve() if args.output else create_output_directory(
-        args.output_root.resolve(), "field-isa", args.preset)
+        args.output_root.resolve(), output_prefix, args.preset)
     output.mkdir(parents=True, exist_ok=True)
     if not args.skip_build:
-        build_targets(args.preset, ["rckangaroo_field_benchmark"])
+        build_targets(args.preset, [build_target])
 
     llvm_bin = Path("/opt/rocm/lib/llvm/bin")
     objdump = llvm_bin / "llvm-objdump"
     readelf = llvm_bin / "llvm-readelf"
     source = (ROOT / "build" / args.preset / "benchmarks" / "CMakeFiles" /
-              "rckangaroo_field_benchmark.dir" / "field_ops_benchmark.hip.o")
+              object_directory / object_name)
     if not source.exists():
         raise SystemExit(f"HIP object not found: {source}")
     if not objdump.exists() or not readelf.exists():
@@ -148,16 +168,16 @@ def main() -> int:
     for code_object in code_objects:
         notes = run([readelf, "--notes", code_object], echo=False).stdout
         (output / f"{code_object.name}.metadata.txt").write_text(notes, encoding="utf-8")
-        resources.extend(parse_metadata(notes, code_object.name))
+        resources.extend(parse_metadata(notes, code_object.name, kernels))
         disassembly = run([objdump, "--disassemble", "--demangle", code_object], echo=False).stdout
         (output / f"{code_object.name}.s").write_text(disassembly, encoding="utf-8")
-        instruction_mix.extend(parse_instruction_mix(disassembly, code_object.name))
+        instruction_mix.extend(parse_instruction_mix(disassembly, code_object.name, kernels))
 
     write_json(output / "resources.json", {"schema": 1, "kernels": resources})
     write_json(output / "instruction_mix.json", {"schema": 1, "kernels": instruction_mix})
     write_csv(output / "resources.csv", resources)
     write_csv(output / "instruction_mix.csv", instruction_mix)
-    print(f"Field ISA and resource artifacts: {output}")
+    print(f"{args.suite} ISA and resource artifacts: {output}")
     return 0
 
 

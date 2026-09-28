@@ -1,6 +1,6 @@
 # RCKangaroo ROCm Porting and Optimization Plan
 
-Status: Phase 4 complete on `gfx950`; `gfx942` runtime validation is pending
+Status: Phase 5 inversion study complete on `gfx950`; `gfx942` runtime validation is pending
 Last updated: 2026-09-28
 Targets: AMD Instinct MI300X (`gfx942`, CDNA3) and MI355X (`gfx950`, CDNA4)
 
@@ -110,6 +110,7 @@ RCKangaroo/
 │   ├── PORTING.md
 │   ├── PROFILING.md
 │   ├── PERFORMANCE.md
+│   ├── PHASE5_WAVE64_INVERSION.md
 │   └── *.pdf
 └── legacy/cuda/
     ├── asm/
@@ -372,6 +373,32 @@ Exit criteria:
 - Queue/progress tests run without deadlock under long stress tests.
 - The design works for both single- and multi-GPU execution.
 
+Implementation checkpoint (2026-09-28), with measurements in
+[PHASE5_WAVE64_INVERSION.md](PHASE5_WAVE64_INVERSION.md):
+
+- Added a wave64 Montgomery-batch primitive using prefix/suffix products and
+  wave shuffles, with explicit zero and partial-wave handling.
+- Added independent GPU correctness coverage for 2,048 values and active
+  widths from 1 through 64.
+- Added a reproducible per-lane versus wave64 benchmark plus `gfx942`/`gfx950`
+  resource and ISA extraction.
+- On MI355X, the wave64 candidate reached 0.107435 Ginversion/s versus
+  0.275659 Ginversion/s for the per-lane baseline: 0.390x the rate and 2.566x
+  the elapsed time.
+- The candidate increased demand from 126 VGPR / 46 SGPR with no spills to
+  128 VGPR / 76 SGPR with eight VGPR spills and 36 private bytes.
+- Retained the uniform per-lane fixed addition chain in production. No
+  `KernelA` integration was made because the isolated primitive lost
+  decisively.
+- Pruned the persistent producer/worker queue before implementation. Moving a
+  fixed-chain inversion to one lane does not reduce wave instruction issue,
+  while a queue adds synchronization, traffic, and residency constraints.
+
+For the selected design, queue/progress tests are not applicable because no
+queue is present. The `gfx950` study is complete with the existing per-lane
+architecture selected. `gfx942` targets compile and have matching resource
+metadata, but physical MI300X correctness and performance validation remain.
+
 ### Phase 6: Tune the hot kernel per architecture
 
 Benchmark matrix:
@@ -550,6 +577,7 @@ Record major choices here as implementation progresses.
 | 2026-09-28 | Use fixed-duration samples and median/MAD as the comparison baseline. | The old cold single-launch result varied with GPU clock state and understated warmed throughput. |
 | 2026-09-28 | Retain both compiler metadata and profiler allocation counts. | Static register demand and allocation-granularity counts differ but are independently useful for occupancy work. |
 | 2026-09-28 | Select compiler-generated Comba MAD and fixed addition-chain inversion on `gfx950`; keep explicit assembly as a measured fallback. | Comba MAD was 13.1x faster for multiply and its chain inversion was 24.6x faster than the portable baseline; explicit MUL/carry assembly was slower. |
+| 2026-09-28 | Retain per-lane inversion and reject wave64 batching and a persistent inversion queue for the current fixed chain. | The queue-free wave64 primitive was correct but 2.566x slower on MI355X, spilled eight VGPRs, and still issued the lane-0 inversion as a wave instruction stream. |
 
 ## 10. Progress checklist
 
@@ -558,7 +586,7 @@ Record major choices here as implementation progresses.
 - [x] Phase 2: portable HIP baseline
 - [x] Phase 3: repeatable profiling
 - [ ] Phase 4: optimized field arithmetic (`gfx950` complete; `gfx942` runtime pending)
-- [ ] Phase 5: wave64 inversion design
+- [ ] Phase 5: wave64 inversion design (`gfx950` complete; `gfx942` runtime pending)
 - [ ] Phase 6: per-architecture kernel tuning
 - [ ] Phase 7: host and multi-GPU optimization
 - [ ] Phase 8: optional handwritten AMD ISA
