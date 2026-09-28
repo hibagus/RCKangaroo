@@ -19,7 +19,14 @@ typedef char i8;
 
 
 
+// CPX compute partitioning on MI300X presents each of the 8 XCDs as a separate
+// logical device, so a node of 8 physical GPUs enumerates as 64. The CUDA build
+// keeps 32.
+#ifdef __HIP_PLATFORM_AMD__
+#define MAX_GPU_CNT			64
+#else
 #define MAX_GPU_CNT			32
+#endif
 
 //must be divisible by MD_LEN
 #define STEP_CNT			1000
@@ -27,7 +34,20 @@ typedef char i8;
 #define JMP_CNT				512
 
 #define BLOCK_SIZE			256	
+
+#ifdef __HIP_PLATFORM_AMD__
+// Kangaroos per thread, i.e. the batched-inversion group size.
+//
+// Swept on MI300X (docs/CDNA_PHASE2_DESIGN.md): 8 -> 7871, 12 -> 8363,
+// 24 -> 9325, 32 -> 9444 MKeys/s. Larger is better because one InvModP is
+// amortised over the whole group and because more groups give the thread more
+// independent work to interleave.
+//
+// 32 is the ceiling: L1S2 carries one bit per group in a u32.
+#define PNT_GROUP_CNT		32
+#else
 #define PNT_GROUP_CNT		24
+#endif
 
 // kang type
 #define TAME				0  // Tame kangs

@@ -7,8 +7,12 @@
 #include <iostream>
 #include <vector>
 
+#ifdef __HIP_PLATFORM_AMD__
+#include "cdna/cuda_compat.h"
+#else
 #include "cuda_runtime.h"
 #include "cuda.h"
+#endif
 
 #include "defs.h"
 #include "utils.h"
@@ -81,9 +85,14 @@ void InitGpus()
 	cudaRuntimeGetVersion(&rt);
 	cudaDriverGetVersion(&drv);
 	char drvver[100];
+#ifdef __HIP_PLATFORM_AMD__
+	// ROCm does not use CUDA's major*1000 + minor*10 packing, so print raw.
+	sprintf(drvver, "%d/%d", drv, rt);
+	printf("HIP devices: %d, HIP driver/runtime: %s\r\n", gcnt, drvver);
+#else
 	sprintf(drvver, "%d.%d/%d.%d", drv / 1000, (drv % 100) / 10, rt / 1000, (rt % 100) / 10);
-
 	printf("CUDA devices: %d, CUDA driver/runtime: %s\r\n", gcnt, drvver);
+#endif
 	cudaError_t cudaStatus;
 	for (int i = 0; i < gcnt; i++)
 	{
@@ -99,6 +108,14 @@ void InitGpus()
 
 		cudaDeviceProp deviceProp;
 		cudaGetDeviceProperties(&deviceProp, i);
+#ifdef __HIP_PLATFORM_AMD__
+		// deviceProp.l2CacheSize is documented as always 0 under HIP-Clang, and
+		// major/minor are gfx-derived rather than a capability level, so report
+		// gcnArchName and omit the cache figure rather than print a wrong one.
+		printf("GPU %d: %s, %.2f GB, %d CUs, %s, PCI %d\r\n", i, deviceProp.name,
+			((float)(deviceProp.totalGlobalMem / (1024 * 1024))) / 1024.0f,
+			deviceProp.multiProcessorCount, deviceProp.gcnArchName, deviceProp.pciBusID);
+#else
 		printf("GPU %d: %s, %.2f GB, %d CUs, cap %d.%d, PCI %d, L2 size: %d KB\r\n", i, deviceProp.name, ((float)(deviceProp.totalGlobalMem / (1024 * 1024))) / 1024.0f, deviceProp.multiProcessorCount, deviceProp.major, deviceProp.minor, deviceProp.pciBusID, deviceProp.l2CacheSize / 1024);
 		int cm = deviceProp.major * 10 + deviceProp.minor;
 
@@ -107,6 +124,7 @@ void InitGpus()
 			printf("GPU %d - not supported, skip\r\n", i);
 			continue;
 		}
+#endif
 
 		cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync);
 
@@ -116,6 +134,23 @@ void InitGpus()
 		GpuKangs[GpuCnt]->mpCnt = deviceProp.multiProcessorCount;
 		GpuKangs[GpuCnt]->JumperInd = GpuCnt;
 
+#ifdef __HIP_PLATFORM_AMD__
+		// Match on gcnArchName, not major/minor: HIP reports gfx942 as 9.4 in
+		// some ROCm releases and differently in others, so a numeric test
+		// misclassifies it. There is no asm kernel path on AMD, so sm_inv_cnt
+		// stays 0 and every CU jumps points.
+		GpuKangs[GpuCnt]->Is5xxx = false;
+		GpuKangs[GpuCnt]->sm_inv_cnt = 0;
+		{
+			const char* arch = deviceProp.gcnArchName;
+			if (strstr(arch, "gfx942"))
+				printf("GPU %d: CDNA3 (MI300-series) detected\r\n", i);
+			else if (strstr(arch, "gfx950"))
+				printf("GPU %d: CDNA4 (MI350-series) detected\r\n", i);
+			else
+				printf("GPU %d: %s is untested for this port; expect reduced performance\r\n", i, arch);
+		}
+#else
 		if ((cm != 89) && (cm != 120))
 		{
 			GpuKangs[GpuCnt]->sm_inv_cnt = 0;
@@ -129,6 +164,7 @@ void InitGpus()
 				GpuKangs[GpuCnt]->sm_inv_cnt = 1;
 			printf("GPU %d: turbo kernel is enabled!\r\n", i);
 		}
+#endif
 		GpuCnt++;
 	}
 	printf("Total GPUs for work: %d\r\n", GpuCnt);

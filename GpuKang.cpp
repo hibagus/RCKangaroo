@@ -5,8 +5,12 @@
 
 
 #include <iostream>
+#ifdef __HIP_PLATFORM_AMD__
+#include "cdna/cuda_compat.h"
+#else
 #include "cuda_runtime.h"
 #include "cuda.h"
+#endif
 
 #include "GpuKang.h"
 
@@ -19,9 +23,51 @@ void CallGpuKernelC(TKparams Kparams);
 void AddPointsToList(u32* data, int cnt, u32 KangCnt, u64 ops_cnt, int JumperInd);
 extern bool gGenMode; //tames generation mode
 
+// How many workgroups to launch per CU/SM.
+//
+// RC's design is one persistent block per SM, which on NVIDIA is effectively
+// forced: KernelA requests 98 KB of shared memory, so a second block cannot fit.
+// The consequence is 1 wave/SIMD and therefore no latency hiding at all - every
+// memory access stalls the only resident wave. RC compensates by hand-scheduling
+// the overlap in SASS.
+//
+// This port's KernelA needs 32 KB of LDS and 153 VGPRs, so a CDNA3 CU can host
+// two workgroups (64 KB of 64 KB LDS, 306 of 512 VGPRs). But occupancy is capped
+// by whichever resource runs out first, and with BlockCnt == mpCnt the *grid* is
+// the cap: 304 workgroups over 304 CUs is one each no matter what fits.
+// Launching 2x the workgroups is what actually raises occupancy.
+//
+// Costs proportional memory, since KangCnt scales with it, and costs DP overhead
+// at small ranges - see docs/CDNA_PHASE1_RESULTS.md. Override with
+// RCK_BLOCKS_PER_CU; 1 is the better setting below ~85 bits.
+static int GetBlocksPerCU()
+{
+#ifdef __HIP_PLATFORM_AMD__
+	static int cached = -1;
+	if (cached < 0)
+	{
+		// 3 measured best on MI300X: 2 -> 9444, 3 -> 9599 MKeys/s at
+		// PNT_GROUP_CNT=32. Beyond 3 the extra workgroups cannot co-reside.
+		cached = 3;
+		const char* e = getenv("RCK_BLOCKS_PER_CU");
+		if (e)
+		{
+			int v = atoi(e);
+			if (v >= 1 && v <= 8)
+				cached = v;
+		}
+	}
+	return cached;
+#else
+	return 1;
+#endif
+}
+
 int RCGpuKang::CalcKangCnt()
 {
-	Kparams.BlockCnt = mpCnt;
+	// Must match Prepare(), otherwise the DP and K estimates printed at startup
+	// are computed from a different kangaroo count than the run actually uses.
+	Kparams.BlockCnt = (mpCnt - sm_inv_cnt) * GetBlocksPerCU();
 	Kparams.BlockSize = BLOCK_SIZE;
 	Kparams.GroupCnt = PNT_GROUP_CNT;
 	return Kparams.BlockSize* Kparams.GroupCnt* Kparams.BlockCnt;
@@ -48,30 +94,57 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 	if (err != cudaSuccess)
 		return false;
 
-	char path[500];
-	path[0] = 0;
-//	GetExeDir(path, 500);
-//	strcat(path, "/");
-	if (Is5xxx)
-		strcat(path, "kernel_sm120.cubin");
-	else
-		strcat(path, "kernel_sm89.cubin");
-	if (!cc.LoadCubin(path))
-		return false;
+#ifndef __HIP_PLATFORM_AMD__
+	// Only load the prebuilt SASS kernels when they will actually be used.
+	if (sm_inv_cnt)
+	{
+		char path[500];
+		path[0] = 0;
+//		GetExeDir(path, 500);
+//		strcat(path, "/");
+		if (Is5xxx)
+			strcat(path, "kernel_sm120.cubin");
+		else
+			strcat(path, "kernel_sm89.cubin");
+		if (!cc.LoadCubin(path))
+			return false;
+	}
+#endif
 
-	Kparams.BlockCnt = mpCnt - sm_inv_cnt;
+	Kparams.BlockCnt = (mpCnt - sm_inv_cnt) * GetBlocksPerCU();
 	Kparams.BlockSize = BLOCK_SIZE;
 	Kparams.GroupCnt = PNT_GROUP_CNT;
 	KangCnt = Kparams.BlockSize * Kparams.GroupCnt * Kparams.BlockCnt;
 	Kparams.KangCnt = KangCnt;
 	Kparams.DP = DP;
+#ifdef __HIP_PLATFORM_AMD__
+	// KernelA keeps only jmp1 in LDS; jmp2 is read from global on a separate
+	// branch so the hot path still lowers to ds_read_b128. See note 5 in
+	// src/hip/RCGpuCore.hip. Halving this from 64 KB is what lets two
+	// workgroups co-reside on a CDNA3 CU.
+	//
+	// Occupancy is pinned by amdgpu_waves_per_eu in the kernel attributes, so
+	// unlike the CUDA build there is no need to over-request LDS to force
+	// 1 block/CU - these are the real working-set sizes.
+	Kparams.KernelA_LDS_Size = 16 * 1024;
+	Kparams.KernelB_LDS_Size = 48 * 1024;
+	Kparams.KernelC_LDS_Size = 96 * JMP_CNT;
+#else
 	Kparams.KernelA_LDS_Size = 98 * 1024;
 	Kparams.KernelB_LDS_Size = 48 * 1024;
 	Kparams.KernelC_LDS_Size = 96 * JMP_CNT;
+#endif
 	Kparams.IsGenMode = gGenMode;
 	Kparams.dp_mask = (u32)((1ull << DP) - 1);
 	Kparams.iter_cnt = STEP_CNT;
+	// Producer waves per block is BLOCK_SIZE / wave width: 8 on NVIDIA (warp32),
+	// 4 on CDNA (wave64). Only the asm producer/consumer path consumes this, but
+	// keep it truthful for the platform.
+#ifdef __HIP_PLATFORM_AMD__
+	Kparams.StopThr = (int)(0.5 * (Kparams.BlockCnt * 4));
+#else
 	Kparams.StopThr = (int)(0.5 * (Kparams.BlockCnt * 8)); //at the end, work will be stopped when number of finished producers is higher than this value. Must be <(WarpCnt-32)
+#endif
 
 //allocate gpu mem
 	u64 size;
@@ -84,7 +157,7 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 	Inv_DataSize += (32 * 4) * 256 * 8; //plus mailboxes IN (recv), 256 - max number of SM, every SM has 8 warps, so 2K producers
 	Inv_DataSize += 4 * 256 * 8; //plus ReadyFlag for mailboxes
 
-	int L2size = Kparams.KangCnt * (3 * 32) + Inv_DataSize;
+	u64 L2size = (u64)Kparams.KangCnt * (3 * 32) + Inv_DataSize;
 	total_mem += L2size;
 	err = cudaMalloc((void**)&Kparams.L2, L2size);
 	if (err != cudaSuccess)
@@ -92,6 +165,15 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 		printf("GPU %d, Allocate L2 memory failed: %s\n", CudaIndex, cudaGetErrorString(err));
 		return false;
 	}
+#ifndef __HIP_PLATFORM_AMD__
+	// Pin the kangaroo state array in L2. There is no CDNA equivalent:
+	// hipLimit_t has no cudaLimitPersistingL2CacheSize, hipStreamSetAttribute
+	// compiles but is a no-op on MI300/MI350, and both l2CacheSize and
+	// persistingL2CacheMaxSize read 0 on AMD. On CDNA3 the locality this reaches
+	// for comes from the 256 MB Infinity Cache - L2 is only 4 MB per XCD across
+	// 8 XCDs, and device-scope traffic bypasses it entirely in SPX mode, so a
+	// persistence window would be the wrong tool regardless. Streaming traffic
+	// is kept out of the way with non-temporal stores instead.
 	size = L2size;
 	if (size > persistingL2CacheMaxSize)
 		size = persistingL2CacheMaxSize;
@@ -110,6 +192,7 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 		printf("GPU %d, cudaStreamSetAttribute failed: %s\n", CudaIndex, cudaGetErrorString(err));
 		return false;
 	}
+#endif
 	
 	size = MAX_DP_CNT * GPU_DP_SIZE + 16;
 	total_mem += size;
@@ -162,7 +245,10 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 		return false;
 	}
 
-	size = mpCnt * Kparams.BlockSize * sizeof(u64);
+	// KernelA indexes L1S2[BLOCK_X * BLOCK_SIZE + THREAD_X] as u32, so it needs
+	// BlockCnt * BlockSize entries. Sizing it from mpCnt as u64 is 2x oversized
+	// at one block per CU and an overrun above two.
+	size = (u64)Kparams.BlockCnt * Kparams.BlockSize * sizeof(u32);
 	total_mem += size;
 	err = cudaMalloc((void**)&Kparams.L1S2, size);
 	if (err != cudaSuccess)
@@ -560,7 +646,8 @@ bool RCGpuKang::Start()
 	}
 	free(gpu_pnts);
 
-	err = cudaMemset(Kparams.L1S2, 0, mpCnt * Kparams.BlockSize * 8);
+	// Must match the allocation above.
+	err = cudaMemset(Kparams.L1S2, 0, (u64)Kparams.BlockCnt * Kparams.BlockSize * sizeof(u32));
 	if (err != cudaSuccess)
 		return false;
 	cudaMemset(Kparams.dbg_buf, 0, 1024);
@@ -633,6 +720,11 @@ void RCGpuKang::Execute()
 		cudaMemset(Kparams.DPTable, 0, KangCnt * sizeof(u32));
 		cudaMemset(Kparams.LoopedKangs, 0, 8);
 
+#ifdef __HIP_PLATFORM_AMD__
+		// The CDNA build has no asm kernel path; sm_inv_cnt is always 0 here.
+		CallGpuKernelA(Kparams);
+		CallGpuKernelB(Kparams);
+#else
 		if (sm_inv_cnt) //use turbo asm kernels
 			Asm_CallGpuKernelAB();
 		else
@@ -640,8 +732,20 @@ void RCGpuKang::Execute()
 			CallGpuKernelA(Kparams);
 			CallGpuKernelB(Kparams);
 		}
+#endif
 
 		CallGpuKernelC(Kparams);
+
+		// There is no error check anywhere else in the codebase; all
+		// synchronisation is the incidental blocking device-to-host copy below.
+		// A failed launch is otherwise completely silent.
+		err = cudaGetLastError();
+		if (err != cudaSuccess)
+		{
+			printf("GPU %d, kernel launch failed: %s\r\n", CudaIndex, cudaGetErrorString(err));
+			gTotalErrors++;
+			break;
+		}
 
 		int cnt;
 		err = cudaMemcpy(&cnt, Kparams.DPs_out, 4, cudaMemcpyDeviceToHost);
@@ -725,6 +829,11 @@ int RCGpuKang::GetStatsSpeed()
 	return res / STATS_WND_SIZE;
 }
 
+#ifndef __HIP_PLATFORM_AMD__
+// Launches the prebuilt NVIDIA SASS kernels through the CUDA driver API. The
+// extra sm_inv_cnt blocks in KernelA are the dedicated inverse-service CUs that
+// talk to the point-jumping blocks through the mailbox region carved out of L2
+// at offset 96*KangCnt. No CDNA counterpart.
 void RCGpuKang::Asm_CallGpuKernelAB()
 {
 	TCallKernelParams kp;
@@ -746,3 +855,4 @@ void RCGpuKang::Asm_CallGpuKernelAB()
 	if (!cc.CallKernel(kp))
 		fprintf(stderr, "KernelB failed!");
 }
+#endif
