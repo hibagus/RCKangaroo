@@ -259,3 +259,45 @@ around every call and the moves land inside carry chains, where they force waits
 Fusing the batched-inversion inner sequence into composite asm blocks - what RC's
 `fuse.asm` does with `CalcToInv_FusedA` - is the remaining lever, and the gap it addresses
 (2,291 instructions against RC's ~1,420) is the right size for it.
+
+---
+
+# The arithmetic is done; the kernel structure is not
+
+`bench/arith_rate.hip` runs the exact per-point-addition primitive sequence - 5 MulModP,
+1 SqrModP, 7 SubModP - entirely in registers with no memory traffic, at the same occupancy
+as the real kernel. Verified from the generated ISA that nothing was optimised away: the
+loop body contains 416 `v_mad_u64_u32` against 408 expected for six multiplies.
+
+| | Tops/s | % of 40.86 nominal peak | point-additions/s |
+|---|---|---|---|
+| Arithmetic in isolation | 35.7 | **87%** | **23.0 G** |
+| KernelA in the real solver | 19.9 | 49% | 10.1 G |
+
+So the field arithmetic sustains 87% of the machine's VALU peak, and **KernelA delivers only
+44% of what its own arithmetic can do.** The missing 56% is kernel structure: the 22.2 VMEM
+accesses per point-addition for kangaroo state, the batched-inverse bookkeeping, the DP
+check, the jump-list and LastPnts stores, and loop overhead.
+
+Two corrections to earlier framing follow from this.
+
+**Further arithmetic optimisation is close to pointless.** At 87% of peak in isolation there
+is at most 13% left in the primitives, and the remaining moves in the multiply's column
+bookkeeping are structurally hard to remove - `v_mad_u64_u32` needs an even-aligned VGPR
+pair for its 64-bit addend, so a 32-bit-granular sliding accumulator costs about two moves
+per column whichever way it is arranged.
+
+**The comparison with RC needs restating.** Applying the same isolation logic to his
+published numbers: his `mod_mul.asm` note gives 120 G MulMod256/s on a 4090, so with ~6
+modular multiplies per point-addition his arithmetic ceiling is ~20 G/s, and he achieves
+14.5 - about **72% structural efficiency against our 44%**. The missing carry-in explains
+why his arithmetic ceiling is reachable at all on lower raw throughput, but it does *not*
+explain this second gap. RC's kernel is simply better at keeping the arithmetic fed, which
+is what hand-scheduling the whole kernel buys: memory operations interleaved into the
+arithmetic by hand, and the modular inverse moved off the critical path entirely onto
+dedicated CUs (his `sm_inv_cnt` producer/consumer design).
+
+Closing the structural gap from 44% to RC's 72% would put a single MI300X at ~16.5 GH/s,
+which is past the ~15 GH/s memory-bandwidth wall - so bandwidth would bind first. That
+makes structure, not arithmetic, the whole of the remaining opportunity, and caps it at
+roughly 1.5x from here.
