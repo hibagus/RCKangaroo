@@ -116,7 +116,7 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 	Inv_DataSize += (32 * 4) * 256 * 8; //plus mailboxes IN (recv), 256 - max number of SM, every SM has 8 warps, so 2K producers
 	Inv_DataSize += 4 * 256 * 8; //plus ReadyFlag for mailboxes
 
-	int L2size = Kparams.KangCnt * (3 * 32) + Inv_DataSize;
+	u64 L2size = (u64)Kparams.KangCnt * (3 * 32) + Inv_DataSize;
 	total_mem += L2size;
 	err = cudaMalloc((void**)&Kparams.L2, L2size);
 	if (err != cudaSuccess)

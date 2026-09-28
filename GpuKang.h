@@ -58,7 +58,7 @@ private:
 	int cur_stats_ind;
 	int SpeedStats[STATS_WND_SIZE];
 
-	int Inv_DataSize;
+	u64 Inv_DataSize;
 
 	void GenerateRndDistances();
 	bool Start();
@@ -74,7 +74,7 @@ private:
 	void Asm_CallGpuKernelAB();
 #endif
 public:
-	int persistingL2CacheMaxSize;
+	u64 persistingL2CacheMaxSize;
 	int CudaIndex; //gpu index in cuda
 	int mpCnt;
 	int KangCnt;
