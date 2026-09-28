@@ -179,6 +179,53 @@ __global__ __launch_bounds__(256) void add_thr(u64* out, u32 seed)
 }
 
 // ---------------------------------------------------------------------------
+// V_MUL_LO_U32 / V_MUL_HI_U32 : 32x32 multiply into a single register.
+//
+// These write one register rather than a pair, which is what lets the modular
+// reduction sidestep the even-aligned-pair requirement V_MAD_U64_U32 imposes on
+// its 64-bit addend. Worth measuring separately: the reduction issues 16 of them
+// per call, so if they were not full rate that would dominate it.
+// ---------------------------------------------------------------------------
+
+__global__ __launch_bounds__(256) void mullo_thr(u64* out, u32 seed)
+{
+    u32 base = (u32)out[0] + threadIdx.x + seed;
+    u32 b = base | 1u;
+    u32 a0=base, a1=base+1, a2=base+2, a3=base+3;
+    u32 a4=base+4, a5=base+5, a6=base+6, a7=base+7;
+    for (int i = 0; i < ITER; i++) {
+        asm volatile(
+            "v_mul_lo_u32 %0, %8, %0\n\t" "v_mul_lo_u32 %1, %8, %1\n\t"
+            "v_mul_lo_u32 %2, %8, %2\n\t" "v_mul_lo_u32 %3, %8, %3\n\t"
+            "v_mul_lo_u32 %4, %8, %4\n\t" "v_mul_lo_u32 %5, %8, %5\n\t"
+            "v_mul_lo_u32 %6, %8, %6\n\t" "v_mul_lo_u32 %7, %8, %7\n\t"
+            : "+v"(a0),"+v"(a1),"+v"(a2),"+v"(a3),"+v"(a4),"+v"(a5),"+v"(a6),"+v"(a7)
+            : "v"(b));
+    }
+    u32 s = a0^a1^a2^a3^a4^a5^a6^a7;
+    if (s == 0x12345678u) out[threadIdx.x] = s;
+}
+
+__global__ __launch_bounds__(256) void mulhi_thr(u64* out, u32 seed)
+{
+    u32 base = (u32)out[0] + threadIdx.x + seed;
+    u32 b = base | 1u;
+    u32 a0=base, a1=base+1, a2=base+2, a3=base+3;
+    u32 a4=base+4, a5=base+5, a6=base+6, a7=base+7;
+    for (int i = 0; i < ITER; i++) {
+        asm volatile(
+            "v_mul_hi_u32 %0, %8, %0\n\t" "v_mul_hi_u32 %1, %8, %1\n\t"
+            "v_mul_hi_u32 %2, %8, %2\n\t" "v_mul_hi_u32 %3, %8, %3\n\t"
+            "v_mul_hi_u32 %4, %8, %4\n\t" "v_mul_hi_u32 %5, %8, %5\n\t"
+            "v_mul_hi_u32 %6, %8, %6\n\t" "v_mul_hi_u32 %7, %8, %7\n\t"
+            : "+v"(a0),"+v"(a1),"+v"(a2),"+v"(a3),"+v"(a4),"+v"(a5),"+v"(a6),"+v"(a7)
+            : "v"(b));
+    }
+    u32 s = a0^a1^a2^a3^a4^a5^a6^a7;
+    if (s == 0x12345678u) out[threadIdx.x] = s;
+}
+
+// ---------------------------------------------------------------------------
 // V_ACCVGPR_WRITE / V_ACCVGPR_READ : the AGPR round trip.
 // On gfx942/gfx950 AGPRs are NOT valid VALU operands, so the 256 AccVGPRs are
 // only usable as software-managed scratch via these moves. If they are full
@@ -316,6 +363,8 @@ int main(int argc, char** argv)
     rs.push_back({"v_mad_u64_u32      (LAT, 1 chain) ", time_kernel(mad_lat,   blocks, threads, d_out, ops_valu, &ms), ops_valu, ms});
     rs.push_back({"v_add_co_u32 x8 indep SGPR carry  ", time_kernel(addc_thr,  blocks, threads, d_out, ops_valu, &ms), ops_valu, ms});
     rs.push_back({"v_addc_co_u32 serial VCC chain    ", time_kernel(addc_lat,  blocks, threads, d_out, ops_valu, &ms), ops_valu, ms});
+    rs.push_back({"v_mul_lo_u32       (THR, 8 chains)", time_kernel(mullo_thr, blocks, threads, d_out, ops_valu, &ms), ops_valu, ms});
+    rs.push_back({"v_mul_hi_u32       (THR, 8 chains)", time_kernel(mulhi_thr, blocks, threads, d_out, ops_valu, &ms), ops_valu, ms});
     rs.push_back({"v_accvgpr_wr/rd    (THR)          ", time_kernel(agpr_thr,  blocks, threads, d_out, ops_valu, &ms), ops_valu, ms});
     rs.push_back({"ds_read (divergent 32KB gather)  ", time_kernel(lds_gather, blocks, threads, d_out, ops_lds,  &ms), ops_lds,  ms});
 

@@ -301,3 +301,54 @@ Closing the structural gap from 44% to RC's 72% would put a single MI300X at ~16
 which is past the ~15 GH/s memory-bandwidth wall - so bandwidth would bind first. That
 makes structure, not arithmetic, the whole of the remaining opportunity, and caps it at
 roughly 1.5x from here.
+
+## Diagnosing the structural gap: what it is not
+
+With the arithmetic at 87% of peak in isolation and KernelA at 44% of that, four more
+candidates were measured. The useful outcome was mostly negative.
+
+**The VALU is saturated, and memory is not stalling.** Derived counters over KernelA:
+
+| | |
+|---|---|
+| `VALUBusy` | **94.1%** |
+| `MemUnitStalled` | 0.65% |
+| `MeanOccupancyPerCU` | 9.09 waves (of 12 requested) |
+
+This reframes the problem. KernelA is not waiting on memory - it is issue-bound. The
+earlier "59% VALU utilisation" figure was computed against the Phase 0 single-wave ceiling
+of 33.8 Tops/s, which the 3-wave arithmetic benchmark then exceeded at 35.7 Tops/s; that
+ceiling was not the real one.
+
+**`v_mul_lo_u32` and `v_mul_hi_u32` are full rate**, at 0.83 and 0.94 of a plain add. The
+asm reduction issues 16 of them per call, so had they been quarter rate they would have
+dominated it. Phase 0 measured `v_mad_u64_u32` but not these, which was a real gap; both
+are now in `bench/isa_rate.hip`.
+
+**Software-pipelining the state loads made it slower.** Issuing each group's `x0`/`y0`
+loads one iteration ahead - the overlap RC schedules by hand - cost 2.2% (9877 against
+10100 MKeys/s). The `Copy_u64_x4` rotation adds eight register moves per group, and with
+`MemUnitStalled` at 0.65% there was no latency to hide in the first place. Reverted.
+
+### What the gap actually is
+
+KernelA executes **1,971 VALU instructions per point-addition against 1,554 for the same
+arithmetic in isolation** - 1.27x more - and runs them at a lower effective rate. The extra
+instructions are overwhelmingly register moves: 473 in KernelA's per-group body against 208
+in the benchmark's loop, a difference of 265.
+
+Those moves are not inside the asm blocks; measured directly, the blocks contain **zero**
+moves and zero wait states. They are the compiler materialising 256-bit values into and out
+of each block. KernelA keeps roughly ten 256-bit quantities live at once - x, y, x0, y0,
+jmp_x, jmp_y, tmp, tmp2, inverse, dxs - about 80 VGPRs of operands, and every inline-asm
+block is an opaque scheduling barrier across which it cannot keep them in place.
+
+That is the structural limit of per-primitive assembly. Fusing adjacent primitives helps at
+the margin - `SubModP` feeding `MulModP` occurs four times per group and each fusion saves
+the intermediate's eight moves, so ~32 of 265 - but the bulk is systemic to having asm
+blocks at all rather than one hand-scheduled kernel.
+
+Closing it properly means writing KernelA's whole inner loop as a single assembly routine
+with an explicit register allocation, which is what RC does and what `main.asm` is. That is
+a large undertaking, and the ~15 GH/s memory-bandwidth wall caps its return at about 1.5x
+from here.
