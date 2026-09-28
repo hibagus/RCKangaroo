@@ -10,9 +10,10 @@
 #include "cuda_runtime.h"
 #include "cuda.h"
 
-#include "defs.h"
-#include "utils.h"
-#include "GpuKang.h"
+#include "rckangaroo/types.hpp"
+#include "rckangaroo/config.hpp"
+#include "rckangaroo/utils.hpp"
+#include "gpu_kang.hpp"
 #include "rckangaroo/runtime_options.hpp"
 
 

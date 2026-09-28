@@ -6,8 +6,9 @@
 
 #pragma once
 
-#include "defs.h"
-#include "utils.h"
+#include "rckangaroo/types.hpp"
+#include "rckangaroo/config.hpp"
+#include "rckangaroo/utils.hpp"
 
 class EcInt
 {
@@ -74,4 +75,4 @@ public:
 
 void InitEc();
 void DeInitEc();
-void SetRndSeed(u64 seed);
+void SetRndSeed(u64 seed);

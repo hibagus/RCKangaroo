@@ -19,41 +19,33 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-option(RCK_BUILD_CUDA "Build the legacy CUDA executable" ON)
+option(RCK_BUILD_CUDA "Build the legacy CUDA reference executable" OFF)
+
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+include(CompilerWarnings)
+include(Sanitizers)
 
 set(THREADS_PREFER_PTHREAD_FLAG TRUE)
 find_package(Threads REQUIRED)
 
 add_library(rckangaroo_core STATIC
-    Ec.cpp
+    src/core/ec.cpp
     src/core/runtime_options.cpp
-    utils.cpp
+    src/core/utils.cpp
 )
 add_library(RCKangaroo::core ALIAS rckangaroo_core)
 
 target_include_directories(rckangaroo_core PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
 )
 
-target_link_libraries(rckangaroo_core PUBLIC
-    Threads::Threads
-)
-
+target_link_libraries(rckangaroo_core PUBLIC Threads::Threads)
 if(UNIX AND NOT APPLE)
     target_link_libraries(rckangaroo_core PUBLIC rt)
 endif()
 
-if(MSVC)
-    target_compile_options(rckangaroo_core PRIVATE /W4)
-else()
-    target_compile_options(rckangaroo_core PRIVATE
-        -Wall
-        -Wextra
-        -Wpedantic
-        -Wno-unknown-pragmas
-    )
-endif()
+rck_set_project_warnings(rckangaroo_core)
+rck_enable_sanitizers(rckangaroo_core)
 
 if(RCK_BUILD_CUDA)
     set(CUDAToolkit_ROOT "/usr/local/cuda-12.8" CACHE PATH "CUDA Toolkit root")
@@ -68,19 +60,19 @@ if(RCK_BUILD_CUDA)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     set(CMAKE_CUDA_EXTENSIONS OFF)
 
-    add_executable(rckangaroo
-        RCKangaroo.cpp
-        GpuKang.cpp
-        CallCubin.cpp
-        RCGpuCore.cu
+    add_executable(rckangaroo_cuda
+        apps/rckangaroo.cpp
+        legacy/cuda/call_cubin.cpp
+        legacy/cuda/gpu_kang.cpp
+        legacy/cuda/kernels.cu
     )
 
-    target_include_directories(rckangaroo PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}"
+    target_include_directories(rckangaroo_cuda PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/legacy/cuda"
         ${CUDAToolkit_INCLUDE_DIRS}
     )
 
-    target_compile_options(rckangaroo PRIVATE
+    target_compile_options(rckangaroo_cuda PRIVATE
         $<$<COMPILE_LANGUAGE:CUDA>:-O3>
         $<$<COMPILE_LANGUAGE:CUDA>:-gencode=arch=compute_89,code=compute_89>
         $<$<COMPILE_LANGUAGE:CUDA>:-gencode=arch=compute_86,code=compute_86>
@@ -88,31 +80,28 @@ if(RCK_BUILD_CUDA)
         $<$<COMPILE_LANGUAGE:CUDA>:-gencode=arch=compute_61,code=compute_61>
     )
 
-    if(NOT TARGET CUDA::cudart_static)
-        message(FATAL_ERROR "CUDA::cudart_static was not found. Check CUDAToolkit_ROOT and CUDA Toolkit installation.")
-    endif()
-
-    target_link_libraries(rckangaroo PRIVATE
+    target_link_libraries(rckangaroo_cuda PRIVATE
         RCKangaroo::core
         CUDA::cudart_static
         CUDA::cuda_driver
         ${CMAKE_DL_LIBS}
     )
 
-    if(MSVC)
-        target_compile_options(rckangaroo PRIVATE /W4)
-    else()
-        target_compile_options(rckangaroo PRIVATE
-            $<$<COMPILE_LANGUAGE:C,CXX>:-Wall>
-            $<$<COMPILE_LANGUAGE:C,CXX>:-Wextra>
-            $<$<COMPILE_LANGUAGE:C,CXX>:-Wpedantic>
-            $<$<COMPILE_LANGUAGE:C,CXX>:-Wno-unknown-pragmas>
-        )
-    endif()
+    rck_set_project_warnings(rckangaroo_cuda)
 
-    set_target_properties(rckangaroo PROPERTIES
+    set_target_properties(rckangaroo_cuda PROPERTIES
         CUDA_RUNTIME_LIBRARY Static
+        OUTPUT_NAME rckangaroo
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+    )
+
+    add_custom_command(TARGET rckangaroo_cuda POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/legacy/cuda/cubin/kernel_sm89.cubin"
+            "$<TARGET_FILE_DIR:rckangaroo_cuda>/kernel_sm89.cubin"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_CURRENT_SOURCE_DIR}/legacy/cuda/cubin/kernel_sm120.cubin"
+            "$<TARGET_FILE_DIR:rckangaroo_cuda>/kernel_sm120.cubin"
     )
 endif()
 

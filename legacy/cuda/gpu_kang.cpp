@@ -8,7 +8,7 @@
 #include "cuda_runtime.h"
 #include "cuda.h"
 
-#include "GpuKang.h"
+#include "gpu_kang.hpp"
 
 cudaError_t cuSetGpuParams(TKparams Kparams, u64* _jmp2_table);
 void CallGpuKernelGen(TKparams Kparams);
@@ -745,4 +745,4 @@ void RCGpuKang::Asm_CallGpuKernelAB()
 	kp.sharedSize = Kparams.KernelB_LDS_Size;
 	if (!cc.CallKernel(kp))
 		fprintf(stderr, "KernelB failed!");
-}
+}

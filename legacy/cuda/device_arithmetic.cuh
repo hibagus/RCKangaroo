@@ -4,6 +4,7 @@
 // https://github.com/RetiredC
 
 
+#include "rckangaroo/types.hpp"
 //PTX asm
 //"volatile" is important
 #define add_64(res, a, b)				asm volatile ("add.u64 %0, %1, %2;" : "=l"(res) : "l"(a), "l"(b)  );

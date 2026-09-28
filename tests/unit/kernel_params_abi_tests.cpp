@@ -1,4 +1,4 @@
-#include "rckangaroo/kernel_params_abi.hpp"
+#include "rckangaroo/gpu/kernel_params_abi.hpp"
 
 #include <iostream>
 

@@ -9,7 +9,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <vector>
-#include "defs.h"
+#include "rckangaroo/types.hpp"
 
 #ifdef _WIN32
 

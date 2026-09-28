@@ -1,4 +1,4 @@
-#include "Ec.h"
+#include "rckangaroo/ec.hpp"
 
 #include <boost/multiprecision/cpp_int.hpp>
 

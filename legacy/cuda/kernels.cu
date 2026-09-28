@@ -4,8 +4,9 @@
 // https://github.com/RetiredC
 
 
-#include "rckangaroo/kernel_params_abi.hpp"
-#include "RCGpuUtils.h"
+#include "rckangaroo/gpu/kernel_params_abi.hpp"
+#include "rckangaroo/config.hpp"
+#include "device_arithmetic.cuh"
 
 //imp2 table points for KernelA
 __device__ __constant__ u64 jmp2_table[8 * JMP_CNT];

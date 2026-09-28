@@ -4,10 +4,10 @@
 // https://github.com/RetiredC
 
 
-#include "defs.h"
-#include "Ec.h"
+#include "rckangaroo/types.hpp"
+#include "rckangaroo/ec.hpp"
 #include <random>
-#include "utils.h"
+#include "rckangaroo/utils.hpp"
 
 // https://en.bitcoin.it/wiki/Secp256k1
 EcInt g_P; //FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFF FFFFFFFE FFFFFC2F

@@ -6,8 +6,10 @@
 
 #pragma once
 
-#include "Ec.h"
-#include "CallCubin.h"
+#include "rckangaroo/ec.hpp"
+#include "rckangaroo/config.hpp"
+#include "rckangaroo/gpu/kernel_params.hpp"
+#include "call_cubin.hpp"
 
 #define STATS_WND_SIZE	16
 

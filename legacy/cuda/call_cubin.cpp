@@ -3,7 +3,7 @@
 // License: GPLv3, see "LICENSE.TXT" file
 // https://github.com/RetiredC
 
-#include "CallCubin.h"
+#include "call_cubin.hpp"
 #include <stdio.h>
 #pragma comment(lib, "cuda.lib")
 #pragma warning(disable : 4996)
@@ -88,4 +88,4 @@ bool TCubinCall::CopyToSymbol(const char* sym_name, void* data, int size)
 	}
 
 	return true;
-}
+}

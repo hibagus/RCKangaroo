@@ -1,6 +1,6 @@
 #pragma once
 
-#include "defs.h"
+#include "rckangaroo/gpu/kernel_params.hpp"
 
 #include <cstddef>
 #include <type_traits>
