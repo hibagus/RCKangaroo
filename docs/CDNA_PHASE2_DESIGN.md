@@ -168,3 +168,94 @@ This is the structural limit of per-primitive assembly, and it is exactly what R
 the copies into a single schedule rather than calling them in sequence. Fusing the
 batched-inversion inner sequence into composite asm blocks is the next step, and the
 remaining gap - 2,291 instructions against RC's ~1,420 - is about the right size for it.
+
+---
+
+# Hypotheses tested and rejected
+
+After the assembly work, throughput was 9.24 GH/s per GPU at 62.7% VALU utilisation.
+Something other than arithmetic was holding it back. Four candidates were measured; three
+were wrong, which is worth recording so they are not re-investigated.
+
+## Memory bandwidth: substantial but not the wall
+
+`rocprofv3` counters over KernelA (collected one at a time - FETCH_SIZE and WRITE_SIZE
+cannot share a pass):
+
+| | |
+|---|---|
+| read | 1.23 TB/s |
+| write | 0.97 TB/s |
+| combined | **2.20 TB/s** |
+| MI300X HBM3 peak | 5.3 TB/s (41.5%) |
+
+That matches the analytical estimate of ~258 bytes per point-addition, so the model is
+sound. At 41% of peak it is not the binding constraint, but it does bound the endgame: if
+instruction count came down to RC's ~1,420 and throughput scaled accordingly, traffic
+would reach ~3.9 TB/s, which is at the practical HBM limit. **Roughly 15 GH/s per MI300X
+is the ceiling for this algorithm structure** without reducing bytes moved per
+point-addition.
+
+## Cache residency: rejected
+
+RC sizes his kangaroo count to fit the 4090's 72 MB L2 - 786,432 kangaroos x 96 B = 75 MB -
+which is exactly what the `cudaStreamSetAttribute` persistence window does, and what had to
+be compiled out for AMD. The natural inference is that a state array fitting MI300X's
+256 MB Infinity Cache should win.
+
+It does not. Sweeping `PNT_GROUP_CNT`, which scales the working set at constant thread
+count and occupancy:
+
+| PNT_GROUP_CNT | blocks/CU | kangaroos | state array | fits 256 MB MALL? | MKeys/s |
+|---|---|---|---|---|---|
+| 8 | 2 | 1,245,184 | 114 MB | yes | 7871 |
+| 12 | 2 | 1,867,776 | 171 MB | yes | 8363 |
+| 24 | 2 | 3,735,552 | 342 MB | no | 9325 |
+| 32 | 2 | 4,980,736 | 456 MB | no | **9444** |
+| 32 | 3 | 7,471,104 | 684 MB | no | **9599** |
+
+The configurations that fit are the slow ones. Inverse amortisation and per-thread ILP
+dominate cache residency, so bigger groups win even as the working set leaves the MALL
+entirely.
+
+Targeting L2 instead is not reachable. MI300X has **4 MB of L2 per XCD**, 32 MB aggregate
+over 8 XCDs - `rocminfo` reports the per-XCD L2 as "L2: 4096 KB" and the 256 MB MALL as
+"L3". With 38 CUs per XCD, fitting 4 MB would require `PNT_GROUP_CNT` near 1, and the sweep
+shows small groups are far worse.
+
+## Address translation: rejected
+
+The access pattern looks hostile to the TLB. Groups are strided by
+`BLOCK_SIZE * 4 * BlockCnt`, which at 912 workgroups is **7.47 MB**, so one thread's
+x-plane accesses span 239 MB and each workgroup touches ~192 distinct 4 KB pages per step.
+
+Measured with `TCP_UTCL1_*`:
+
+| | |
+|---|---|
+| UTCL1 requests | 914,864,992,812 |
+| UTCL1 hits | 415,742,797,610 |
+| UTCL1 misses | 11,966,245,596 |
+| **L1 TLB miss rate** | **1.31%** |
+
+Not a problem - the hardware is evidently serving this with large pages. No layout change
+needed.
+
+## Occupancy beyond 2 waves/SIMD: marginal
+
+Halving LDS to 16 KB raised the ceiling from 2 to 3 waves/SIMD (registers then bind at
+152 VGPRs). Worth +1.0% for the LDS change and ~+1.3% for the extra wave. Since neither
+VALU nor bandwidth nor translation is saturated, and more waves barely help, the waves are
+stalling on the same thing rather than covering for each other.
+
+## What that leaves
+
+VALU utilisation 63% plus `s_nop` wait states at ~15% of issue slots accounts for most of
+the time. KernelA's static body still carries 475 `v_mov_b32` and 408 `s_nop` against 621
+`v_mad_u64_u32`, and that overhead is the glue *between* asm primitives, not inside them:
+each inline-asm block is an opaque scheduling barrier, so 256-bit operands get materialised
+around every call and the moves land inside carry chains, where they force waits.
+
+Fusing the batched-inversion inner sequence into composite asm blocks - what RC's
+`fuse.asm` does with `CalcToInv_FusedA` - is the remaining lever, and the gap it addresses
+(2,291 instructions against RC's ~1,420) is the right size for it.
