@@ -76,10 +76,10 @@ typedef unsigned __int128 u128;
 #define P_INV32     0x000003D1              // the 977 part; the 2^32 part is a word offset
 #define P0_INV_FULL 0x00000001000003D1ull   // 2^32 + 977
 
-// The 256x256->512 multiply lives in a generated header because it is assembly;
-// see docs/CDNA_PHASE2_DESIGN.md and tools/gen_mul_asm.py. Included after the
-// typedefs above, which it uses.
-#include "mul256_asm.h"
+// The assembly primitives live in a generated header; see
+// docs/CDNA_PHASE2_DESIGN.md and tools/gen_asm.py. Included after the typedefs
+// above, which it uses.
+#include "asm_primitives.h"
 
 // ---------------------------------------------------------------------------
 // Carry primitives.
@@ -194,21 +194,28 @@ __device__ __forceinline__ void NegModP(u64* res)
 
 __device__ __forceinline__ void SubModP(u64* res, const u64* val1, const u64* val2)
 {
+    // Assembly: 30 issue slots against 58 for the C++ form below, which the
+    // compiler spends on register moves and the wait states they force. Called
+    // seven times per point addition, so it is ~20% of the arithmetic.
+    SubModP_asm(res, val1, val2);
+}
+
+// Reference implementation, kept for the differential test to validate the
+// assembly against and as documentation of the intent.
+__device__ __forceinline__ void SubModP_cpp(u64* res, const u64* val1, const u64* val2)
+{
     u64 b = 0;
     u64 r0 = sbb64(val1[0], val2[0], &b);
     u64 r1 = sbb64(val1[1], val2[1], &b);
     u64 r2 = sbb64(val1[2], val2[2], &b);
     u64 r3 = sbb64(val1[3], val2[3], &b);
 
-    // Add p back iff it went negative. mask is all-ones on borrow; three of p's
-    // four limbs are all-ones, so they need nothing beyond the mask itself.
     const u64 mask = 0ull - b;
     u64 c = 0;
     res[0] = adc64(r0, P_0 & mask, &c);
     res[1] = adc64(r1, mask, &c);
     res[2] = adc64(r2, mask, &c);
     res[3] = adc64(r3, mask, &c);
-    // final carry is the 2^256 that cancels the borrow - correctly discarded
 }
 
 __device__ __forceinline__ void AddModP(u64* res, const u64* val1, const u64* val2)

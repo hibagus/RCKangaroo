@@ -100,3 +100,71 @@ leading with the full edge-case cross product (0, 1, p-1, p, 2^256-1, values nea
 that stress the Solinas fold). Every asm primitive gets validated against the C++ version
 it replaces before it goes anywhere near the hot loop, and `tests/isa_quality.sh` guards
 the MAD count so a codegen regression cannot masquerade as an algorithmic one.
+
+---
+
+# Phase 2 results
+
+Measured on MI300X, ROCm 10, using puzzle #140 (139-bit range) as the benchmark
+configuration: K = 1.15 with 0% DP overhead, which is the regime a real solve runs in.
+
+## Primitive costs
+
+Issue slots, i.e. VALU instructions plus the `s_nop` wait states they force:
+
+| | before | after | |
+|---|---|---|---|
+| `mul_256_to_512` | 264 VALU + 63 nop = 327 | 171 + 8 = **179** | 1.83x |
+| `MulModP` | 369 + 86 = 455 | 271 + 31 = **302** | 1.51x |
+| `SqrModP` | 307 + 32 = 339 | 269 + 32 = **301** | 1.13x |
+| `SubModP` | 49 + 9 = 58 | 30 + 0 = **30** | 1.93x |
+
+The multiply's 64 MADs and 64 carry ops are both exactly optimal - one
+carry-accumulate per product, nothing spare.
+
+## End to end
+
+| | VALU / point-add | VALU utilisation | per GPU | 8 GPUs |
+|---|---|---|---|---|
+| Phase 1 | 2,967.6 | 53.3% | 6.25 GH/s | 49.2 GH/s |
+| + occupancy | 2,967.6 | - | 8.1 GH/s | 64.5 GH/s |
+| + asm multiply & subtract | **2,290.9** | **62.7%** | **9.24 GH/s** | **73.9 GH/s** |
+
+Instruction count fell 1.30x and utilisation rose from 53% to 63%. Throughput gained
+1.15x from the assembly on top of 1.30x from the occupancy work.
+
+Reference: RTX 4090 = 14.5 GH/s, RTX 5090 = 19.3 GH/s. The node is at 5.1x a single 4090
+and 3.8x a single 5090.
+
+## What did not pay off, and why
+
+**A dedicated squaring is not worth writing.** The symmetry saving relies on doubling each
+off-diagonal product, and `v_mad_u64_u32` cannot double - adding the product twice costs
+two MADs, exactly what computing both halves of the general multiply costs. The two-pass
+alternative (accumulate 28 off-diagonal products, double the whole 512-bit result, then add
+8 diagonal squares) works out to roughly 156 instructions against 171, about 9%, for real
+added complexity and carry-handling risk. Skipped.
+
+Note `SqrModP` gained only 1.13x, versus 1.51x for `MulModP`. Routing it through the asm
+multiply cost it the CSE the compiler had been doing on duplicate partial products - it was
+15% cheaper than `MulModP` in C++ and is now the same. The asm win still dominates.
+
+**`SubModP` gained less end to end than its slot count implied.** It is 7 calls per
+point-addition and its 28-slot saving is 8.7% of the primitive budget, which at the
+observed instruction-to-throughput ratio should have been worth ~4%. Measured: +0.5%. No
+register regression caused it (KernelA is 152 VGPRs, no spills), so the arithmetic is no
+longer the constraint at the margin.
+
+## Where the remaining overhead is
+
+KernelA's static body - roughly one group iteration - still contains 475 `v_mov_b32` and
+408 `s_nop` against 621 `v_mad_u64_u32`. That overhead is no longer *inside* the
+primitives; it is the glue between them. Each inline-asm block is an opaque scheduling
+barrier, so the compiler must materialise 256-bit operands into and out of registers
+around every call instead of keeping them in place.
+
+This is the structural limit of per-primitive assembly, and it is exactly what RC's
+`fuse.asm` addresses on the NVIDIA side: `CalcToInv_FusedA` interleaves SubMod, MulMod and
+the copies into a single schedule rather than calling them in sequence. Fusing the
+batched-inversion inner sequence into composite asm blocks is the next step, and the
+remaining gap - 2,291 instructions against RC's ~1,420 - is about the right size for it.
