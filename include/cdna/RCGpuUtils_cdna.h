@@ -76,6 +76,11 @@ typedef unsigned __int128 u128;
 #define P_INV32     0x000003D1              // the 977 part; the 2^32 part is a word offset
 #define P0_INV_FULL 0x00000001000003D1ull   // 2^32 + 977
 
+// The 256x256->512 multiply lives in a generated header because it is assembly;
+// see docs/CDNA_PHASE2_DESIGN.md and tools/gen_mul_asm.py. Included after the
+// typedefs above, which it uses.
+#include "mul256_asm.h"
+
 // ---------------------------------------------------------------------------
 // Carry primitives.
 //
@@ -344,7 +349,7 @@ __device__ __forceinline__ void reduce_512_to_256(u64* res, const u64* buff)
 __device__ __forceinline__ void MulModP(u64* res, const u64* val1, const u64* val2)
 {
     u64 buff[8];
-    mul_256_to_512(buff, val1, val2);
+    mul_256_to_512_asm(buff, val1, val2);
     reduce_512_to_256(res, buff);
 }
 
@@ -355,7 +360,7 @@ __device__ __forceinline__ void MulModP(u64* res, const u64* val1, const u64* va
 __device__ __forceinline__ void SqrModP(u64* res, const u64* val)
 {
     u64 buff[8];
-    mul_256_to_512(buff, val, val);
+    mul_256_to_512_asm(buff, val, val);
     reduce_512_to_256(res, buff);
 }
 
