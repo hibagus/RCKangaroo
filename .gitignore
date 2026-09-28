@@ -1,0 +1,16 @@
+# HIP/CDNA build output
+build-hip/
+build/
+*.o
+*.d
+*.hsaco
+
+# Profiler output
+.rocprofv3/
+prof/
+*.csv
+*.rpd
+
+# Test scratch
+*.bin
+tames*.dat
