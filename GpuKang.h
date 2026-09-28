@@ -7,7 +7,11 @@
 #pragma once
 
 #include "Ec.h"
+#ifdef __HIP_PLATFORM_AMD__
+#include "cdna/cuda_compat.h"
+#else
 #include "CallCubin.h"
+#endif
 
 #define STATS_WND_SIZE	16
 
@@ -63,8 +67,12 @@ private:
 	int Dbg_CheckKangs();
 #endif
 
+#ifndef __HIP_PLATFORM_AMD__
+	// Prebuilt NVIDIA SASS "turbo" kernels, loaded through the CUDA driver API.
+	// No AMD counterpart: the CDNA build always uses the compiled HIP kernels.
 	TCubinCall cc;
 	void Asm_CallGpuKernelAB();
+#endif
 public:
 	int persistingL2CacheMaxSize;
 	int CudaIndex; //gpu index in cuda

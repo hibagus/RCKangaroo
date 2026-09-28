@@ -5,8 +5,12 @@
 
 
 #include <iostream>
+#ifdef __HIP_PLATFORM_AMD__
+#include "cdna/cuda_compat.h"
+#else
 #include "cuda_runtime.h"
 #include "cuda.h"
+#endif
 
 #include "GpuKang.h"
 
@@ -48,6 +52,7 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 	if (err != cudaSuccess)
 		return false;
 
+#ifndef __HIP_PLATFORM_AMD__
 	char path[500];
 	path[0] = 0;
 //	GetExeDir(path, 500);
@@ -58,6 +63,7 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 		strcat(path, "kernel_sm89.cubin");
 	if (!cc.LoadCubin(path))
 		return false;
+#endif
 
 	Kparams.BlockCnt = mpCnt - sm_inv_cnt;
 	Kparams.BlockSize = BLOCK_SIZE;
@@ -65,13 +71,33 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 	KangCnt = Kparams.BlockSize * Kparams.GroupCnt * Kparams.BlockCnt;
 	Kparams.KangCnt = KangCnt;
 	Kparams.DP = DP;
+#ifdef __HIP_PLATFORM_AMD__
+	// KernelA holds both jump tables in LDS (2 x 32 KB) because selecting
+	// between address spaces would force generic flat_load addressing; see
+	// note 5 in src/hip/RCGpuCore.hip. 64 KB is CDNA3's per-workgroup limit.
+	//
+	// Occupancy is pinned by amdgpu_waves_per_eu in the kernel attributes, so
+	// unlike the CUDA build there is no need to over-request LDS to force
+	// 1 block/CU - these are the real working-set sizes.
+	Kparams.KernelA_LDS_Size = 64 * 1024;
+	Kparams.KernelB_LDS_Size = 48 * 1024;
+	Kparams.KernelC_LDS_Size = 96 * JMP_CNT;
+#else
 	Kparams.KernelA_LDS_Size = 98 * 1024;
 	Kparams.KernelB_LDS_Size = 48 * 1024;
 	Kparams.KernelC_LDS_Size = 96 * JMP_CNT;
+#endif
 	Kparams.IsGenMode = gGenMode;
 	Kparams.dp_mask = (u32)((1ull << DP) - 1);
 	Kparams.iter_cnt = STEP_CNT;
+	// Producer waves per block is BLOCK_SIZE / wave width: 8 on NVIDIA (warp32),
+	// 4 on CDNA (wave64). Only the asm producer/consumer path consumes this, but
+	// keep it truthful for the platform.
+#ifdef __HIP_PLATFORM_AMD__
+	Kparams.StopThr = (int)(0.5 * (Kparams.BlockCnt * 4));
+#else
 	Kparams.StopThr = (int)(0.5 * (Kparams.BlockCnt * 8)); //at the end, work will be stopped when number of finished producers is higher than this value. Must be <(WarpCnt-32)
+#endif
 
 //allocate gpu mem
 	u64 size;
@@ -92,6 +118,15 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 		printf("GPU %d, Allocate L2 memory failed: %s\n", CudaIndex, cudaGetErrorString(err));
 		return false;
 	}
+#ifndef __HIP_PLATFORM_AMD__
+	// Pin the kangaroo state array in L2. There is no CDNA equivalent:
+	// hipLimit_t has no cudaLimitPersistingL2CacheSize, hipStreamSetAttribute
+	// compiles but is a no-op on MI300/MI350, and both l2CacheSize and
+	// persistingL2CacheMaxSize read 0 on AMD. On CDNA3 the locality this reaches
+	// for comes from the 256 MB Infinity Cache - L2 is only 4 MB per XCD across
+	// 8 XCDs, and device-scope traffic bypasses it entirely in SPX mode, so a
+	// persistence window would be the wrong tool regardless. Streaming traffic
+	// is kept out of the way with non-temporal stores instead.
 	size = L2size;
 	if (size > persistingL2CacheMaxSize)
 		size = persistingL2CacheMaxSize;
@@ -110,6 +145,7 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 		printf("GPU %d, cudaStreamSetAttribute failed: %s\n", CudaIndex, cudaGetErrorString(err));
 		return false;
 	}
+#endif
 	
 	size = MAX_DP_CNT * GPU_DP_SIZE + 16;
 	total_mem += size;
@@ -633,6 +669,11 @@ void RCGpuKang::Execute()
 		cudaMemset(Kparams.DPTable, 0, KangCnt * sizeof(u32));
 		cudaMemset(Kparams.LoopedKangs, 0, 8);
 
+#ifdef __HIP_PLATFORM_AMD__
+		// The CDNA build has no asm kernel path; sm_inv_cnt is always 0 here.
+		CallGpuKernelA(Kparams);
+		CallGpuKernelB(Kparams);
+#else
 		if (sm_inv_cnt) //use turbo asm kernels
 			Asm_CallGpuKernelAB();
 		else
@@ -640,6 +681,7 @@ void RCGpuKang::Execute()
 			CallGpuKernelA(Kparams);
 			CallGpuKernelB(Kparams);
 		}
+#endif
 
 		CallGpuKernelC(Kparams);
 
@@ -725,6 +767,11 @@ int RCGpuKang::GetStatsSpeed()
 	return res / STATS_WND_SIZE;
 }
 
+#ifndef __HIP_PLATFORM_AMD__
+// Launches the prebuilt NVIDIA SASS kernels through the CUDA driver API. The
+// extra sm_inv_cnt blocks in KernelA are the dedicated inverse-service CUs that
+// talk to the point-jumping blocks through the mailbox region carved out of L2
+// at offset 96*KangCnt. No CDNA counterpart.
 void RCGpuKang::Asm_CallGpuKernelAB()
 {
 	TCallKernelParams kp;
@@ -746,3 +793,4 @@ void RCGpuKang::Asm_CallGpuKernelAB()
 	if (!cc.CallKernel(kp))
 		fprintf(stderr, "KernelB failed!");
 }
+#endif
