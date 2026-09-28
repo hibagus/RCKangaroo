@@ -87,4 +87,36 @@ if(RCK_BUILD_HIP)
 
 	add_test(NAME rckangaroo.gpu.kernels COMMAND rckangaroo_gpu_kernel_tests)
 	set_tests_properties(rckangaroo.gpu.kernels PROPERTIES LABELS "gpu;hip")
+
+	if(RCK_ENABLE_SLOW_GPU_TESTS)
+		file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/end_to_end")
+
+		add_test(NAME rckangaroo.gpu.end_to_end.private_2
+			COMMAND $<TARGET_FILE:rckangaroo_hip>
+				-gpu 0 -range 32 -dp 14 -start 0
+				-pubkey 02C6047F9441ED7D6D3045406E95C07CD85C778E4B8CEF3CA7ABAC09B95C709EE5
+				--seed 1 --duration 120
+		)
+		set_tests_properties(rckangaroo.gpu.end_to_end.private_2 PROPERTIES
+			LABELS "gpu;hip;slow;end-to-end"
+			PASS_REGULAR_EXPRESSION "PRIVATE KEY: 0+2"
+			RUN_SERIAL TRUE
+			TIMEOUT 180
+			WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/end_to_end"
+		)
+
+		add_test(NAME rckangaroo.gpu.end_to_end.offset_private_3
+			COMMAND $<TARGET_FILE:rckangaroo_hip>
+				-gpu 0 -range 32 -dp 14 -start 1
+				-pubkey 02F9308A019258C31049344F85F89D5229B531C845836F99B08601F113BCE036F9
+				--seed 1 --duration 120
+		)
+		set_tests_properties(rckangaroo.gpu.end_to_end.offset_private_3 PROPERTIES
+			LABELS "gpu;hip;slow;end-to-end"
+			PASS_REGULAR_EXPRESSION "PRIVATE KEY: 0+3"
+			RUN_SERIAL TRUE
+			TIMEOUT 180
+			WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/end_to_end"
+		)
+	endif()
 endif()

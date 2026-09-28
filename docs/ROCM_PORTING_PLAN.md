@@ -1,6 +1,6 @@
 # RCKangaroo ROCm Porting and Optimization Plan
 
-Status: Phase 0 complete; Phase 1 is next
+Status: Phase 2 complete; Phase 3 is next
 Last updated: 2026-09-28
 Targets: AMD Instinct MI300X (`gfx942`, CDNA3) and MI355X (`gfx950`, CDNA4)
 
@@ -219,6 +219,22 @@ Exit criteria:
 - KernelGen and fixed one-step jump tests match CPU results.
 - Fixed end-to-end solver tests match the CPU/reference implementation.
 - A first per-GPU MI355X throughput number is recorded.
+
+Completion record (2026-09-28):
+
+- Native HIP builds completed for `gfx942`, `gfx950`, and a combined
+  `gfx942;gfx950` binary with ROCm 7.2.
+- Portable field tests passed for 256 deterministic add, subtract, multiply,
+  square, and inverse vectors on MI355X.
+- `KernelGen` and a one-step `KernelA` run matched the CPU implementation for
+  6,144 kangaroos.
+- Both fixed range-32 end-to-end vectors recovered the expected keys (`2` and
+  `3`) on one MI355X.
+- The first single-GPU portable `KernelA` baseline measured 113.918 MKeys/s on
+  MI355X. See [PERFORMANCE.md](PERFORMANCE.md) for the exact workload and
+  limitations.
+- Real MI300X execution is still required before release support is declared;
+  Phase 2 validates `gfx942` by cross-compilation only.
 
 ### Phase 3: Establish repeatable profiling
 
@@ -484,12 +500,15 @@ Record major choices here as implementation progresses.
 | 2026-09-28 | Require canonical CPU field results in `[0, p)`. | The independent oracle exposed `p` for `-0` and `p + r` after some multiplications. |
 | 2026-09-28 | Derive separate deterministic RNG streams for each benchmark case and GPU initialization. | Re-seeding one shared stream inside `SolvePoint` would otherwise repeat benchmark keys. |
 | 2026-09-28 | Preserve the legacy `TKparams` size and offsets while replacing `bool` with `u32`. | Existing cubins consume the 192-byte binary layout; `u32` occupies the same padded slot and is explicit for HIP. |
+| 2026-09-28 | Use 32 KiB, 48 KiB, and 48 KiB of dynamic LDS for portable Kernels A, B, and C. | These are the tables actually accessed by the generic kernels and all fit the MI300X 64 KiB limit. |
+| 2026-09-28 | Use fixed-exponent Fermat inversion in the initial portable field layer. | It is simple, target-independent, and passed independent GPU field tests; inversion optimization remains explicit Phase 4/5 work. |
+| 2026-09-28 | Keep long solver vectors opt-in with `RCK_ENABLE_SLOW_GPU_TESTS`. | Each vector allocates about 4.7 GiB and took 25–32 seconds on the current MI355X baseline. |
 
 ## 10. Progress checklist
 
 - [x] Phase 0: deterministic correctness oracle
-- [ ] Phase 1: repository reorganization
-- [ ] Phase 2: portable HIP baseline
+- [x] Phase 1: repository reorganization
+- [x] Phase 2: portable HIP baseline
 - [ ] Phase 3: repeatable profiling
 - [ ] Phase 4: optimized field arithmetic
 - [ ] Phase 5: wave64 inversion design

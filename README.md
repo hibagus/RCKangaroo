@@ -27,6 +27,29 @@ Discussion thread: https://bitcointalk.org/index.php?topic=5517607
 - No advanced features like networking, saving/loading DPs, etc.
 
 
+<b>Building with ROCm:</b>
+
+The native HIP backend has presets for MI300X (`gfx942`), MI355X (`gfx950`),
+and a combined binary:
+
+```sh
+cmake --preset mi355x
+cmake --build --preset mi355x -j
+ctest --test-dir build/mi355x --output-on-failure
+
+cmake --preset mi300x
+cmake --build --preset mi300x -j
+
+cmake --preset rocm-fat
+cmake --build --preset rocm-fat -j
+```
+
+The executable is written to `build/<preset>/bin/rckangaroo`. The retained
+CUDA implementation is opt-in through `RCK_BUILD_CUDA`; it is not part of the
+default HIP path. See `docs/ROCM_PORTING_PLAN.md` and `docs/PERFORMANCE.md` for
+validation status and baseline results.
+
+
 <b>Command line parameters:</b>
 
 <b>-gpu</b>		which GPUs are used, for example, "035" means that GPUs #0, #3 and #5 are used. If not specified, all available GPUs are used. 
@@ -104,4 +127,4 @@ v1.1:
 
 v1.0:
 
-- initial release.
+- initial release.

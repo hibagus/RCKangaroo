@@ -21,6 +21,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(RCK_BUILD_CUDA "Build the legacy CUDA reference executable" OFF)
 option(RCK_BUILD_HIP "Build the native HIP executable" OFF)
+option(RCK_ENABLE_SLOW_GPU_TESTS "Enable long-running HIP solver acceptance tests" OFF)
 set(RCK_HIP_ARCHITECTURES "gfx942;gfx950" CACHE STRING
     "AMD GPU targets for the HIP backend")
 
