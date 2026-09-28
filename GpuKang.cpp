@@ -691,6 +691,17 @@ void RCGpuKang::Execute()
 
 		CallGpuKernelC(Kparams);
 
+		// There is no error check anywhere else in the codebase; all
+		// synchronisation is the incidental blocking device-to-host copy below.
+		// A failed launch is otherwise completely silent.
+		err = cudaGetLastError();
+		if (err != cudaSuccess)
+		{
+			printf("GPU %d, kernel launch failed: %s\r\n", CudaIndex, cudaGetErrorString(err));
+			gTotalErrors++;
+			break;
+		}
+
 		int cnt;
 		err = cudaMemcpy(&cnt, Kparams.DPs_out, 4, cudaMemcpyDeviceToHost);
 		if (err != cudaSuccess)
