@@ -50,6 +50,19 @@ default HIP path. See `docs/ROCM_PORTING_PLAN.md`, `docs/PROFILING.md`, and
 `docs/PERFORMANCE.md` for validation status, reproducible profiling commands,
 and baseline results.
 
+The measured MI355X production preset selects 256 threads, one workgroup per
+CU, 32 points per lane, 2,048 steps per launch, 64 KiB KernelA LDS, and
+workgroup-major state. The MI300X preset conservatively uses 24 points, 1,000
+steps, 32 KiB KernelA LDS, and group-major state until it is tuned on physical
+gfx942 hardware. The fat binary selects the matching values at runtime.
+
+Build-time experiments can use the RCK_BLOCK_SIZE, RCK_BLOCKS_PER_CU,
+RCK_POINT_GROUP_COUNT, RCK_STEP_COUNT, RCK_KERNEL_A_TABLE_MODE, and
+RCK_STATE_LAYOUT CMake cache variables. The architecture defaults can be
+disabled with RCK_USE_ARCH_TABLE_DEFAULTS and
+RCK_USE_ARCH_STATE_LAYOUT_DEFAULTS. See
+docs/PHASE6_KERNEL_TUNING.md for the measured matrices and runner commands.
+
 
 <b>Command line parameters:</b>
 
@@ -72,6 +85,10 @@ and baseline results.
 <b>--iterations</b>	maximum number of random keys to solve in benchmark mode. The legacy-style alias "-iterations" is also accepted.
 
 <b>--duration</b>	maximum run duration in seconds. An active solve is stopped cleanly when the deadline is reached. The legacy-style alias "-duration" is also accepted.
+
+<b>--point-groups</b>	override the architecture-selected even number of points processed per GPU lane (2-32). Intended for controlled tuning runs.
+
+<b>--kernel-steps</b>	override the number of kangaroo steps processed per Kernel A/B launch (1-65535). Intended for controlled tuning runs.
 
 When public key is solved, software displays it and also writes it to "RESULTS.TXT" file. 
 

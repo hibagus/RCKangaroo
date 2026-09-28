@@ -30,7 +30,11 @@
       "displayName": "ROCm MI300X (gfx942)",
       "cacheVariables": {
         "RCK_BUILD_HIP": "ON",
-        "RCK_HIP_ARCHITECTURES": "gfx942"
+        "RCK_HIP_ARCHITECTURES": "gfx942",
+        "RCK_GFX942_POINT_GROUP_COUNT": "24",
+        "RCK_GFX942_STEP_COUNT": "1000",
+        "RCK_USE_ARCH_TABLE_DEFAULTS": "ON",
+        "RCK_USE_ARCH_STATE_LAYOUT_DEFAULTS": "ON"
       }
     },
     {
@@ -39,7 +43,11 @@
       "displayName": "ROCm MI355X (gfx950)",
       "cacheVariables": {
         "RCK_BUILD_HIP": "ON",
-        "RCK_HIP_ARCHITECTURES": "gfx950"
+        "RCK_HIP_ARCHITECTURES": "gfx950",
+        "RCK_GFX950_POINT_GROUP_COUNT": "32",
+        "RCK_GFX950_STEP_COUNT": "2048",
+        "RCK_USE_ARCH_TABLE_DEFAULTS": "ON",
+        "RCK_USE_ARCH_STATE_LAYOUT_DEFAULTS": "ON"
       }
     },
     {
@@ -48,7 +56,13 @@
       "displayName": "ROCm gfx942 + gfx950 fat binary",
       "cacheVariables": {
         "RCK_BUILD_HIP": "ON",
-        "RCK_HIP_ARCHITECTURES": "gfx942;gfx950"
+        "RCK_HIP_ARCHITECTURES": "gfx942;gfx950",
+        "RCK_GFX942_POINT_GROUP_COUNT": "24",
+        "RCK_GFX942_STEP_COUNT": "1000",
+        "RCK_GFX950_POINT_GROUP_COUNT": "32",
+        "RCK_GFX950_STEP_COUNT": "2048",
+        "RCK_USE_ARCH_TABLE_DEFAULTS": "ON",
+        "RCK_USE_ARCH_STATE_LAYOUT_DEFAULTS": "ON"
       }
     }
   ],

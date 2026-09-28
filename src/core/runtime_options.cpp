@@ -79,6 +79,29 @@ RuntimeOptionParseResult ParseRuntimeOption(
         return ParseValue("--duration", argc, argv, next_index,
                           options.duration_seconds, false, error);
     }
+    if (IsOption(argument, "--kernel-steps")) {
+        const RuntimeOptionParseResult result =
+            ParseValue("--kernel-steps", argc, argv, next_index,
+                       options.kernel_steps, false, error);
+        if (result == RuntimeOptionParseResult::success &&
+            options.kernel_steps > 65535) {
+            error = "--kernel-steps must be between 1 and 65535";
+            return RuntimeOptionParseResult::error;
+        }
+        return result;
+    }
+    if (IsOption(argument, "--point-groups")) {
+        const RuntimeOptionParseResult result =
+            ParseValue("--point-groups", argc, argv, next_index,
+                       options.point_groups, false, error);
+        if (result == RuntimeOptionParseResult::success &&
+            (options.point_groups < 2 || options.point_groups > 32 ||
+             (options.point_groups & 1U) != 0)) {
+            error = "--point-groups must be an even value between 2 and 32";
+            return RuntimeOptionParseResult::error;
+        }
+        return result;
+    }
     return RuntimeOptionParseResult::not_runtime_option;
 }
 

@@ -8,6 +8,7 @@
 #include "rckangaroo/config.hpp"
 #include "rckangaroo/ec.hpp"
 #include "rckangaroo/gpu/kernels.hpp"
+#include "rckangaroo/gpu/tuning.hpp"
 
 namespace
 {
@@ -27,9 +28,9 @@ bool EqualCoordinate(const u64* actual, const EcInt& expected)
 	return std::memcmp(actual, expected.data, 4 * sizeof(u64)) == 0;
 }
 
-void StorePoint(std::vector<u64>& soa, u32 index, const EcPoint& point)
+void StorePoint(std::vector<u64>& soa, u32 kangaroo_count, u32 index, const EcPoint& point)
 {
-	const size_t coordinate_stride = static_cast<size_t>(kKangarooCount) * 4;
+	const size_t coordinate_stride = static_cast<size_t>(kangaroo_count) * 4;
 	std::memcpy(soa.data() + 4 * index, point.x.data, 4 * sizeof(u64));
 	std::memcpy(soa.data() + coordinate_stride + 4 * index, point.y.data, 4 * sizeof(u64));
 }
@@ -85,7 +86,7 @@ bool TestKernelGen(hipStream_t stream)
 	return passed;
 }
 
-bool TestKernelAOneStep(hipStream_t stream)
+bool TestKernelAOneStep(hipStream_t stream, u32 group_count, u32 kernel_a_lds_bytes)
 {
 	Ec ec;
 	EcInt scalar_one;
@@ -98,9 +99,10 @@ bool TestKernelAOneStep(hipStream_t stream)
 	EcPoint jump = ec.MultiplyG(scalar_two);
 	EcPoint expected = ec.MultiplyG(scalar_three);
 
-	std::vector<u64> host_l2(static_cast<size_t>(kKangarooCount) * 12, 0);
-	for (u32 index = 0; index < kKangarooCount; ++index)
-		StorePoint(host_l2, index, generator);
+	const u32 kangaroo_count = kBlockCount * BLOCK_SIZE * group_count;
+	std::vector<u64> host_l2(static_cast<size_t>(kangaroo_count) * 12, 0);
+	for (u32 index = 0; index < kangaroo_count; ++index)
+		StorePoint(host_l2, kangaroo_count, index, generator);
 
 	std::vector<u64> jump_table_1(static_cast<size_t>(JMP_CNT) * 12, 0);
 	std::vector<u64> jump_table_2(static_cast<size_t>(JMP_CNT) * 8, 0);
@@ -115,16 +117,16 @@ bool TestKernelAOneStep(hipStream_t stream)
 	TKparams params{};
 	params.BlockCnt = kBlockCount;
 	params.BlockSize = BLOCK_SIZE;
-	params.GroupCnt = PNT_GROUP_CNT;
-	params.KangCnt = kKangarooCount;
+	params.GroupCnt = group_count;
+	params.KangCnt = kangaroo_count;
 	params.iter_cnt = 1;
 	params.dp_mask = 0xFFFFFFFFu;
-	params.KernelA_LDS_Size = 8 * JMP_CNT * sizeof(u64);
+	params.KernelA_LDS_Size = kernel_a_lds_bytes;
 
 	const size_t l2_bytes = host_l2.size() * sizeof(u64);
-	const size_t last_points_bytes = static_cast<size_t>(kKangarooCount) * MD_LEN * 64;
-	const size_t jump_list_bytes = static_cast<size_t>(kKangarooCount) * sizeof(u16);
-	const size_t dp_table_bytes = static_cast<size_t>(kKangarooCount) *
+	const size_t last_points_bytes = static_cast<size_t>(kangaroo_count) * MD_LEN * 64;
+	const size_t jump_list_bytes = static_cast<size_t>(kangaroo_count) * sizeof(u16);
+	const size_t dp_table_bytes = static_cast<size_t>(kangaroo_count) *
 		(sizeof(u32) + DPTABLE_MAX_CNT * 16);
 	if (!CheckHip(hipMalloc(&params.L2, l2_bytes), "hipMalloc(KernelA L2)") ||
 		!CheckHip(hipMalloc(&params.Jumps1, jump_table_1.size() * sizeof(u64)), "hipMalloc(Jumps1)") ||
@@ -150,14 +152,16 @@ bool TestKernelAOneStep(hipStream_t stream)
 		"hipMemcpy(KernelA output)"))
 		return false;
 
-	const size_t coordinate_stride = static_cast<size_t>(kKangarooCount) * 4;
+	const size_t coordinate_stride = static_cast<size_t>(kangaroo_count) * 4;
 	bool passed = true;
-	for (u32 index = 0; index < kKangarooCount; ++index)
+	for (u32 index = 0; index < kangaroo_count; ++index)
 	{
 		if (!EqualCoordinate(host_l2.data() + 4 * index, expected.x) ||
 			!EqualCoordinate(host_l2.data() + coordinate_stride + 4 * index, expected.y))
 		{
-			std::fprintf(stderr, "KernelA one-step mismatch at kangaroo %u\n", index);
+			std::fprintf(stderr,
+				"KernelA one-step mismatch at kangaroo %u with %u groups\n",
+				index, group_count);
 			passed = false;
 			break;
 		}
@@ -179,16 +183,24 @@ int main()
 {
 	if (!CheckHip(hipSetDevice(0), "hipSetDevice"))
 		return EXIT_FAILURE;
+	hipDeviceProp_t properties{};
+	if (!CheckHip(hipGetDeviceProperties(&properties, 0), "hipGetDeviceProperties"))
+		return EXIT_FAILURE;
+	const rckangaroo::hip::ArchitectureTuning tuning =
+		rckangaroo::hip::SelectArchitectureTuning(properties.gcnArchName);
 	hipStream_t stream = nullptr;
 	if (!CheckHip(hipStreamCreateWithFlags(&stream, hipStreamNonBlocking), "hipStreamCreateWithFlags"))
 		return EXIT_FAILURE;
 
 	InitEc();
-	const bool passed = TestKernelGen(stream) && TestKernelAOneStep(stream);
+	bool passed = TestKernelGen(stream);
+	constexpr u32 group_counts[] = {8, 12, 16, 24, 32};
+	for (const u32 group_count : group_counts)
+		passed &= TestKernelAOneStep(stream, group_count, tuning.kernel_a_lds_bytes);
 	DeInitEc();
 	const bool destroyed = CheckHip(hipStreamDestroy(stream), "hipStreamDestroy");
 	if (!passed || !destroyed)
 		return EXIT_FAILURE;
-	std::printf("KernelGen and KernelA one-step CPU comparisons passed.\n");
+	std::printf("KernelGen and KernelA one-step CPU comparisons passed for groups 8-32.\n");
 	return EXIT_SUCCESS;
 }

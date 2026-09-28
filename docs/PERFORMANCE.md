@@ -122,3 +122,34 @@ Ginversion/s, or 0.390x the rate. It also introduced eight VGPR spills. The
 production `KernelA` therefore remains on per-lane inversion. See
 [PHASE5_WAVE64_INVERSION.md](PHASE5_WAVE64_INVERSION.md) for the algorithm,
 benchmark protocol, ISA evidence, and MI300X validation status.
+
+## Phase 6 per-architecture kernel tuning
+
+The measured MI355X production defaults are 256 threads, one workgroup per CU,
+32 points per lane, 2,048 steps per solver launch, two 32 KiB point tables in
+LDS, and workgroup-major point state.
+
+A no-override production verification selected that complete configuration and
+measured 3,811.692 MKeys/s (three 500 ms samples, 1.259 MKeys/s MAD). The longer
+individual selection protocols measured:
+
+| Selection | Baseline | Winner | Improvement |
+|---|---:|---:|---:|
+| 24 to 32 groups | 3,353.342 MKeys/s | 3,751.144 MKeys/s | 11.86% |
+| 1,000 to 2,048 steps | 4,443.119 MKeys/s | 4,455.360 MKeys/s end-to-end | 0.28% |
+| split to 64 KiB LDS tables | 3,720.992 MKeys/s | 3,790.978 MKeys/s | 1.88% |
+| group- to workgroup-major | 3,814.094 MKeys/s | 3,820.874 MKeys/s | 0.18% |
+
+A final paired step run on the fully selected build measured 4,453.052 MKeys/s
+at 2,048 steps and 4,452.552 at 1,000 steps. The 0.01% nominal advantage keeps
+the peak-first default at 2,048, while 1,000 saves about 4.1 GiB.
+
+These improvements are not additive because each row used its documented
+candidate-specific protocol. The selected gfx950 KernelA uses 146 VGPR, 82
+SGPR, 64 KiB dynamic LDS, no private segment, and no spills. The conservative
+gfx942 KernelA cross-build uses 146 VGPR, 86 SGPR, 32 KiB LDS, and no spills,
+but no MI300X runtime performance claim is made.
+
+See [PHASE6_KERNEL_TUNING.md](PHASE6_KERNEL_TUNING.md) for the full matrices,
+memory tradeoff, correctness gates, A/B fusion decision, reproducible commands,
+and MI300X validation status.

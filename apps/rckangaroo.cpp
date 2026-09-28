@@ -144,7 +144,16 @@ void InitGpus()
 		GpuKangs[GpuCnt]->DeviceIndex = i;
 		GpuKangs[GpuCnt]->mpCnt = deviceProp.multiProcessorCount;
 		GpuKangs[GpuCnt]->JumperInd = GpuCnt;
-		printf("GPU %d: native HIP kernel path enabled.\r\n", i);
+		GpuKangs[GpuCnt]->ApplyArchitectureTuning(deviceProp.gcnArchName);
+		if (gRuntimeOptions.point_groups)
+			GpuKangs[GpuCnt]->PointGroupCnt = static_cast<int>(gRuntimeOptions.point_groups);
+		if (gRuntimeOptions.kernel_steps)
+			GpuKangs[GpuCnt]->KernelStepCnt = static_cast<int>(gRuntimeOptions.kernel_steps);
+		printf("GPU %d: native HIP kernel path enabled; %d threads, %d groups, "
+			"%d steps, table mode %u, %u KiB LDS, %s state.\r\n", i, BLOCK_SIZE,
+			GpuKangs[GpuCnt]->PointGroupCnt, GpuKangs[GpuCnt]->KernelStepCnt,
+			GpuKangs[GpuCnt]->KernelATableMode, GpuKangs[GpuCnt]->KernelALdsBytes / 1024,
+			GpuKangs[GpuCnt]->StateLayout ? "workgroup-major" : "group-major");
 		GpuCnt++;
 	}
 	printf("Total GPUs for work: %d\r\n", GpuCnt);
@@ -857,4 +866,3 @@ label_end:
 	free(pPntList2);
 	free(pPntList);
 }
-

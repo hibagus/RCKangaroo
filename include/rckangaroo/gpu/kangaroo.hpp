@@ -83,8 +83,14 @@ public:
 	int mpCnt;
 	int KangCnt;
 	int JumperInd;
+	int PointGroupCnt = PNT_GROUP_CNT;
+	int KernelStepCnt = STEP_CNT;
+	u32 KernelATableMode = RCK_KERNEL_A_TABLE_MODE;
+	u32 KernelALdsBytes = KERNEL_A_LDS_BYTES;
+	u32 StateLayout = RCK_STATE_LAYOUT;
 	bool Failed;
 
+	void ApplyArchitectureTuning(const char* architecture);
 	int CalcKangCnt();
 	bool Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJumps1, EcJMP* _EcJumps2, EcJMP* _EcJumps3);
 	void Stop();

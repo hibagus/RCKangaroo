@@ -1,6 +1,6 @@
 # RCKangaroo ROCm Porting and Optimization Plan
 
-Status: Phase 5 inversion study complete on `gfx950`; `gfx942` runtime validation is pending
+Status: Phase 6 kernel tuning complete on `gfx950`; `gfx942` runtime tuning is pending
 Last updated: 2026-09-28
 Targets: AMD Instinct MI300X (`gfx942`, CDNA3) and MI355X (`gfx950`, CDNA4)
 
@@ -70,10 +70,17 @@ RCKangaroo/
 ├── apps/
 │   └── rckangaroo.cpp
 ├── include/rckangaroo/
-│   ├── ec.hpp
-│   ├── types.hpp
 │   ├── config.hpp
-│   └── gpu/kangaroo.hpp
+│   ├── ec.hpp
+│   ├── runtime_options.hpp
+│   ├── types.hpp
+│   ├── utils.hpp
+│   └── gpu/
+│       ├── kangaroo.hpp
+│       ├── kernel_params.hpp
+│       ├── kernel_params_abi.hpp
+│       ├── kernels.hpp
+│       └── tuning.hpp
 ├── src/
 │   ├── core/
 │   │   ├── ec.cpp
@@ -81,36 +88,32 @@ RCKangaroo/
 │   └── hip/
 │       ├── device.cpp
 │       ├── kernels.hip
-│       ├── kernel_params.hpp
-│       ├── tuning.hpp
 │       └── field/
+│           ├── api.hpp
 │           ├── portable.hpp
-│           ├── amdgcn.hpp
-│           └── secp256k1.hpp
-├── src/amdgcn/
-│   ├── gfx942/
-│   └── gfx950/
+│           ├── variants.hpp
+│           └── wave64.hpp
 ├── tests/
 │   ├── unit/
 │   ├── gpu/
 │   └── end_to_end/
 ├── benchmarks/
-│   ├── field_ops.hip
-│   ├── inversion.hip
-│   └── kangaroo.hip
+│   ├── field_ops_benchmark.hip
+│   ├── hip_kernel_a_benchmark.hip
+│   └── wave64_inverse_benchmark.hip
 ├── scripts/
 │   ├── benchmark/
 │   └── profile/
 ├── cmake/
 │   ├── CompilerWarnings.cmake
-│   ├── ROCmSettings.cmake
 │   └── Sanitizers.cmake
 ├── docs/
 │   ├── ROCM_PORTING_PLAN.md
-│   ├── PORTING.md
 │   ├── PROFILING.md
 │   ├── PERFORMANCE.md
+│   ├── PHASE4_FIELD_ARITHMETIC.md
 │   ├── PHASE5_WAVE64_INVERSION.md
+│   ├── PHASE6_KERNEL_TUNING.md
 │   └── *.pdf
 └── legacy/cuda/
     ├── asm/
@@ -408,7 +411,7 @@ Benchmark matrix:
 | Workgroup size | 64, 128, 256 |
 | Points per lane | 8, 12, 16, 24, 32 |
 | Iterations per launch | 256, 512, 1000, 2048 |
-| Jump-table storage | constant, global read-only, 32/48 KiB LDS, tiled LDS, 96 KiB LDS on `gfx950` |
+| Jump-table storage | constant, global read-only, 32 KiB split LDS, 64 KiB point-only LDS on `gfx950` |
 | Kernel dataflow | split A/B, partially fused, fully fused where registers permit |
 | State layout | current group-major, workgroup-major |
 | Jump-list stores | cached, non-temporal, eliminated by fusion |
@@ -421,7 +424,7 @@ Benchmark matrix:
 
 `gfx950` priorities:
 
-- Compare the 96 KiB combined jump table against smaller LDS arrangements.
+- Compare two 32 KiB point tables in LDS against smaller arrangements.
 - Determine whether reduced cache traffic offsets one-workgroup-per-CU residency.
 - Exploit the larger LDS only when the end-to-end result supports it.
 
@@ -438,6 +441,35 @@ Exit criteria:
 - A measured tuning record exists for both targets.
 - Architecture-specific defaults are selected through a small tuning table.
 - Command-line overrides remain available for experimentation.
+
+Implementation checkpoint (2026-09-28), with full matrices and protocols in
+[PHASE6_KERNEL_TUNING.md](PHASE6_KERNEL_TUNING.md):
+
+- Parameterized workgroup size, blocks per CU, points per lane, launch length,
+  table storage, and state layout, and removed hidden 256/24/1000 assumptions.
+- Added CPU/GPU kernel coverage for 8, 12, 16, 24, and 32 groups. KernelB now
+  handles arbitrary positive launch lengths, including a final partial chunk.
+- On MI355X, selected 256 threads, one workgroup per CU, and 32 points per lane.
+  The long confirmation measured 3,751.144 MKeys/s, 11.86% above 24 groups.
+- The initial sweep selected 2,048 steps at 4,455.360 end-to-end MKeys/s, 0.28%
+  above 1,000 steps. A final selected-build pair preserved only a 0.01% nominal
+  lead; 2,048 remains the peak-first default, while 1,000 saves about 4.1 GiB
+  of the roughly 10.5 GiB allocation.
+- Selected two 32 KiB point tables in LDS on gfx950; the long confirmation was
+  1.88% faster than the prior split LDS/constant arrangement.
+- Selected workgroup-major state on gfx950 after it won two correctness-gated
+  measurements; the longer run showed a small 0.18% gain.
+- Retained the split A/B boundary: KernelB is about 2.6% of their combined time
+  at 2,048 steps, so the upper bound did not justify adding its variable loop
+  state to an already register-heavy KernelA.
+- Added an architecture tuning table plus --point-groups and --kernel-steps
+  overrides. Solver and benchmark JSON report the effective selection.
+- The selected gfx942 and gfx950 code objects compile without spills. gfx942
+  uses 32 KiB for KernelA; gfx950 uses 64 KiB.
+
+The gfx950 exit criteria are satisfied. The gfx942 defaults remain provisional:
+they cross-compile and pass static resource checks, but a complete measured
+tuning record still requires physical MI300X hardware.
 
 ### Phase 7: Optimize host and multi-GPU execution
 
@@ -578,6 +610,7 @@ Record major choices here as implementation progresses.
 | 2026-09-28 | Retain both compiler metadata and profiler allocation counts. | Static register demand and allocation-granularity counts differ but are independently useful for occupancy work. |
 | 2026-09-28 | Select compiler-generated Comba MAD and fixed addition-chain inversion on `gfx950`; keep explicit assembly as a measured fallback. | Comba MAD was 13.1x faster for multiply and its chain inversion was 24.6x faster than the portable baseline; explicit MUL/carry assembly was slower. |
 | 2026-09-28 | Retain per-lane inversion and reject wave64 batching and a persistent inversion queue for the current fixed chain. | The queue-free wave64 primitive was correct but 2.566x slower on MI355X, spilled eight VGPRs, and still issued the lane-0 inversion as a wave instruction stream. |
+| 2026-09-28 | Select 256 threads, 32 groups, 2,048 steps, 64 KiB table LDS, and workgroup-major state on `gfx950`; keep conservative `gfx942` defaults provisional. | Correctness-gated MI355X sweeps and confirmations selected every value; `gfx942` is spill-free and within 64 KiB LDS but has not run on MI300X. |
 
 ## 10. Progress checklist
 
@@ -587,7 +620,7 @@ Record major choices here as implementation progresses.
 - [x] Phase 3: repeatable profiling
 - [ ] Phase 4: optimized field arithmetic (`gfx950` complete; `gfx942` runtime pending)
 - [ ] Phase 5: wave64 inversion design (`gfx950` complete; `gfx942` runtime pending)
-- [ ] Phase 6: per-architecture kernel tuning
+- [ ] Phase 6: per-architecture kernel tuning (`gfx950` complete; `gfx942` runtime pending)
 - [ ] Phase 7: host and multi-GPU optimization
 - [ ] Phase 8: optional handwritten AMD ISA
 - [ ] Phase 9: documentation and continuous validation

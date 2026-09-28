@@ -62,6 +62,30 @@ and contains median, MAD, min/max, population standard deviation, launch
 geometry, and profiler-reported allocated VGPR/SGPR/scratch counts. Raw CSVs are
 retained beside the summary.
 
+## Phase 6 tuning sweeps
+
+The Phase 6 runners isolate compile-time geometry/table/layout variants and
+runtime launch choices:
+
+~~~sh
+python3 scripts/benchmark/tune_kernel_a_geometry.py --preset mi355x --device 0
+python3 scripts/benchmark/tune_solver_steps.py --preset mi355x --device 0
+python3 scripts/benchmark/tune_kernel_a_tables.py --preset mi355x --device 0
+python3 scripts/benchmark/tune_state_layout.py --preset mi355x --device 0
+~~~
+
+The geometry, table, and layout runners create separate build directories under
+build/tuning and run the GPU kernel correctness test before benchmarking each
+compile-time candidate. The step runner uses round-robin process samples of the
+normal solver and reports KernelA/B/C event times plus end-to-end throughput.
+All runners save metadata, logs, JSON results, and a Markdown ranking under the
+ignored profiles directory.
+
+Use longer warm-up/sample values and an exact --output directory for confirmation
+runs. The complete measured protocols and selected values are in
+[PHASE6_KERNEL_TUNING.md](PHASE6_KERNEL_TUNING.md).
+
+
 ## Code objects and generated ISA
 
 Archive the bundled AMD code object, metadata, disassembly, and static
@@ -99,6 +123,8 @@ VGPR, SGPR, AGPR, spills, private memory, static/dynamic LDS, wave size, and
 maximum workgroup size. `instruction_mix.json` classifies the generated ISA as
 VALU, SALU, VMEM, LDS, atomic, or other. The full disassembly remains the source
 of truth when an instruction-level optimization is evaluated.
+KernelA's launch-time LDS accounting follows the production architecture table:
+32 KiB for gfx942 and 64 KiB for gfx950.
 
 Compiler metadata counts and profiler allocation-granularity counts are both
 kept deliberately. They answer different questions and should not be silently

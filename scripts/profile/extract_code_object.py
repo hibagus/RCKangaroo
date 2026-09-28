@@ -14,7 +14,17 @@ from common import ROOT, build_targets, create_output_directory, run, write_json
 
 
 HOT_KERNELS = ("KernelGen", "KernelA", "KernelB", "KernelC")
-DYNAMIC_LDS = {"KernelGen": 0, "KernelA": 32768, "KernelB": 49152, "KernelC": 49152}
+DYNAMIC_LDS = {"KernelGen": 0, "KernelB": 49152, "KernelC": 49152}
+
+
+def dynamic_lds_bytes(kernel: str, code_object: str) -> int:
+    if kernel != "KernelA":
+        return DYNAMIC_LDS[kernel]
+    if "gfx950" in code_object:
+        return 65536
+    if "gfx942" in code_object:
+        return 32768
+    raise ValueError(f"cannot select KernelA LDS size for {code_object}")
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -55,7 +65,8 @@ def parse_metadata(notes: str, code_object: str) -> list[dict[str, object]]:
                 current[output_key] = int(match.group(1))
         kernels.append(current)
     for kernel in kernels:
-        kernel["dynamic_lds_bytes"] = DYNAMIC_LDS[str(kernel["kernel"])]
+        kernel["dynamic_lds_bytes"] = dynamic_lds_bytes(
+            str(kernel["kernel"]), code_object)
         kernel["total_lds_bytes"] = int(kernel.get("static_lds_bytes", 0)) + int(kernel["dynamic_lds_bytes"])
     return kernels
 

@@ -13,6 +13,7 @@
 
 #include "rckangaroo/gpu/kangaroo.hpp"
 #include "rckangaroo/gpu/kernels.hpp"
+#include "rckangaroo/gpu/tuning.hpp"
 
 void AddPointsToList(u32* data, int cnt, u32 KangCnt, u64 ops_cnt, int JumperInd);
 extern bool gGenMode; //tames generation mode
@@ -61,11 +62,22 @@ ProfileStats Summarize(const std::vector<float>& values)
 }
 }
 
+void RCGpuKang::ApplyArchitectureTuning(const char* architecture)
+{
+	const rckangaroo::hip::ArchitectureTuning tuning =
+		rckangaroo::hip::SelectArchitectureTuning(architecture);
+	PointGroupCnt = static_cast<int>(tuning.point_group_count);
+	KernelStepCnt = static_cast<int>(tuning.step_count);
+	KernelATableMode = tuning.kernel_a_table_mode;
+	KernelALdsBytes = tuning.kernel_a_lds_bytes;
+	StateLayout = tuning.state_layout;
+}
+
 int RCGpuKang::CalcKangCnt()
 {
-	Kparams.BlockCnt = mpCnt;
+	Kparams.BlockCnt = mpCnt * BLOCKS_PER_CU;
 	Kparams.BlockSize = BLOCK_SIZE;
-	Kparams.GroupCnt = PNT_GROUP_CNT;
+	Kparams.GroupCnt = PointGroupCnt;
 	return Kparams.BlockSize* Kparams.GroupCnt* Kparams.BlockCnt;
 }
 
@@ -108,18 +120,18 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 			return false;
 	}
 
-	Kparams.BlockCnt = mpCnt;
+	Kparams.BlockCnt = mpCnt * BLOCKS_PER_CU;
 	Kparams.BlockSize = BLOCK_SIZE;
-	Kparams.GroupCnt = PNT_GROUP_CNT;
+	Kparams.GroupCnt = PointGroupCnt;
 	KangCnt = Kparams.BlockSize * Kparams.GroupCnt * Kparams.BlockCnt;
 	Kparams.KangCnt = KangCnt;
 	Kparams.DP = DP;
-	Kparams.KernelA_LDS_Size = 8 * JMP_CNT * sizeof(u64);
+	Kparams.KernelA_LDS_Size = KernelALdsBytes;
 	Kparams.KernelB_LDS_Size = 48 * 1024;
 	Kparams.KernelC_LDS_Size = 12 * JMP_CNT * sizeof(u64);
 	Kparams.IsGenMode = gGenMode;
 	Kparams.dp_mask = (u32)((1ull << DP) - 1);
-	Kparams.iter_cnt = STEP_CNT;
+	Kparams.iter_cnt = KernelStepCnt;
 	Kparams.StopThr = (int)(0.5 * (Kparams.BlockCnt * 8)); //at the end, work will be stopped when number of finished producers is higher than this value. Must be <(WarpCnt-32)
 
 // Allocate GPU memory.
@@ -165,7 +177,7 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 		return false;
 	}
 
-	size = 2 * (u64)KangCnt * (STEP_CNT + MD_LEN);
+	size = 2 * (u64)KangCnt * (Kparams.iter_cnt + MD_LEN);
 	total_mem += size;
 	err = hipMalloc((void**)&Kparams.JumpsList, size);
 	if (err != hipSuccess)
@@ -183,7 +195,7 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 		return false;
 	}
 
-	size = mpCnt * Kparams.BlockSize * sizeof(u64);
+	size = static_cast<u64>(Kparams.BlockCnt) * Kparams.BlockSize * sizeof(u32);
 	total_mem += size;
 	err = hipMalloc((void**)&Kparams.L1S2, size);
 	if (err != hipSuccess)
@@ -606,7 +618,8 @@ bool RCGpuKang::Start()
 	}
 	free(gpu_pnts);
 
-	err = hipMemset(Kparams.L1S2, 0, mpCnt * Kparams.BlockSize * 8);
+	err = hipMemset(Kparams.L1S2, 0,
+		static_cast<size_t>(Kparams.BlockCnt) * Kparams.BlockSize * sizeof(u32));
 	if (!CheckHip(err, DeviceIndex, "hipMemset(L1S2)"))
 		return false;
 	err = hipMemsetAsync(Kparams.dbg_buf, 0, 1024, Stream);
@@ -621,7 +634,7 @@ bool RCGpuKang::Start()
 #ifdef DEBUG_MODE
 int RCGpuKang::Dbg_CheckKangs()
 {
-	u32 PartStride = PNT_GROUP_CNT * (Kparams.BlockCnt * 256 * 32);
+	u64 PartStride = static_cast<u64>(Kparams.KangCnt) * 32;
 	u64* kangs = (u64*)malloc(Kparams.KangCnt * 64);
 	u64* dists = (u64*)malloc(Kparams.KangCnt * 32);
 	hipError_t err = hipMemcpy(kangs, Kparams.L2, Kparams.KangCnt * 64, hipMemcpyDeviceToHost);
@@ -835,6 +848,8 @@ void RCGpuKang::PrintProfileSummary() const
 		kernel_c.median, end_to_end.median, KernelAMilliseconds.size());
 	printf("RCK_PROFILE_JSON={\"schema\":1,\"device\":%d,\"blocks\":%u,"
 		"\"threads\":%u,\"groups\":%u,\"iterations\":%u,\"kangaroos\":%u,"
+		"\"kernel_a_table_mode\":%u,\"kernel_a_lds_bytes\":%u,"
+		"\"state_layout\":%u,"
 		"\"sample_count\":%zu,\"kernel_gen_ms\":%.6f,"
 		"\"kernel_a\":{\"median_ms\":%.6f,\"mad_ms\":%.6f,\"min_ms\":%.6f,\"max_ms\":%.6f},"
 		"\"kernel_b\":{\"median_ms\":%.6f,\"mad_ms\":%.6f,\"min_ms\":%.6f,\"max_ms\":%.6f},"
@@ -843,7 +858,8 @@ void RCGpuKang::PrintProfileSummary() const
 		"\"mad_mkeys_per_second\":%.6f,\"min_mkeys_per_second\":%.6f,"
 		"\"max_mkeys_per_second\":%.6f}}\n",
 		DeviceIndex, Kparams.BlockCnt, Kparams.BlockSize, Kparams.GroupCnt,
-		Kparams.iter_cnt, Kparams.KangCnt, KernelAMilliseconds.size(), KernelGenMilliseconds,
+		Kparams.iter_cnt, Kparams.KangCnt, KernelATableMode, KernelALdsBytes,
+		StateLayout, KernelAMilliseconds.size(), KernelGenMilliseconds,
 		kernel_a.median, kernel_a.mad, kernel_a.minimum, kernel_a.maximum,
 		kernel_b.median, kernel_b.mad, kernel_b.minimum, kernel_b.maximum,
 		kernel_c.median, kernel_c.mad, kernel_c.minimum, kernel_c.maximum,

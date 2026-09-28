@@ -62,6 +62,22 @@ void TestSuccessfulOptions()
            "parse --duration");
     Expect(options.duration_seconds == 3600, "store duration seconds");
 
+    char groups_option[] = "--point-groups";
+    char groups[] = "32";
+    char* groups_argv[] = {program, groups_option, groups};
+    Expect(Parse(3, groups_argv, options, error, next_index) ==
+               rckangaroo::RuntimeOptionParseResult::success,
+           "parse --point-groups");
+    Expect(options.point_groups == 32, "store point groups");
+
+    char steps_option[] = "--kernel-steps";
+    char steps[] = "2048";
+    char* steps_argv[] = {program, steps_option, steps};
+    Expect(Parse(3, steps_argv, options, error, next_index) ==
+               rckangaroo::RuntimeOptionParseResult::success,
+           "parse --kernel-steps");
+    Expect(options.kernel_steps == 2048, "store kernel steps");
+
     char maximum[] = "18446744073709551615";
     char* maximum_argv[] = {program, seed_option, maximum};
     Expect(Parse(3, maximum_argv, options, error, next_index) ==
@@ -112,6 +128,25 @@ void TestRejectedOptions()
     Expect(Parse(3, trailing_argv, options, error, next_index) ==
                rckangaroo::RuntimeOptionParseResult::error,
            "reject trailing duration characters");
+
+    char groups_option[] = "--point-groups";
+    char odd_groups[] = "31";
+    char* odd_groups_argv[] = {program, groups_option, odd_groups};
+    Expect(Parse(3, odd_groups_argv, options, error, next_index) ==
+               rckangaroo::RuntimeOptionParseResult::error,
+           "reject odd point-group count");
+    char too_many_groups[] = "34";
+    char* too_many_groups_argv[] = {program, groups_option, too_many_groups};
+    Expect(Parse(3, too_many_groups_argv, options, error, next_index) ==
+               rckangaroo::RuntimeOptionParseResult::error,
+           "reject point-group count above 32");
+
+    char steps_option[] = "--kernel-steps";
+    char too_many_steps[] = "65536";
+    char* too_many_steps_argv[] = {program, steps_option, too_many_steps};
+    Expect(Parse(3, too_many_steps_argv, options, error, next_index) ==
+               rckangaroo::RuntimeOptionParseResult::error,
+           "reject excessive kernel-step count");
 
     char overflow[] = "18446744073709551616";
     char* overflow_argv[] = {program, seed_option, overflow};

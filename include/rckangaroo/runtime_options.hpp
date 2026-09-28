@@ -10,6 +10,8 @@ struct RuntimeOptions {
     std::uint64_t seed = 0;
     std::uint64_t benchmark_iterations = 0;
     std::uint64_t duration_seconds = 0;
+    std::uint64_t kernel_steps = 0;
+    std::uint64_t point_groups = 0;
     bool seed_specified = false;
 };
 

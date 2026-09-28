@@ -11,6 +11,7 @@
 
 #include "rckangaroo/config.hpp"
 #include "rckangaroo/gpu/kernels.hpp"
+#include "rckangaroo/gpu/tuning.hpp"
 
 namespace
 {
@@ -21,6 +22,8 @@ struct BenchmarkOptions
 	int sample_ms = 1000;
 	int sample_count = 5;
 	u32 block_count = 0;
+	u32 group_count = PNT_GROUP_CNT;
+	bool group_count_explicit = false;
 };
 
 constexpr std::array<u64, 4> kGeneratorX = {
@@ -62,7 +65,7 @@ bool ParseOptions(int argc, char** argv, BenchmarkOptions* options)
 		if (argument == "--help")
 		{
 			std::printf("Usage: %s [device] [--device N] [--warmup-ms N] "
-				"[--sample-ms N] [--samples N] [--blocks N]\n", argv[0]);
+				"[--sample-ms N] [--samples N] [--blocks N] [--groups N]\n", argv[0]);
 			return false;
 		}
 		if (index == 1 && !argument.starts_with("-"))
@@ -86,6 +89,11 @@ bool ParseOptions(int argc, char** argv, BenchmarkOptions* options)
 			options->sample_count = value;
 		else if (argument == "--blocks" && value > 0)
 			options->block_count = static_cast<u32>(value);
+		else if (argument == "--groups" && value >= 2 && value <= 32 && !(value & 1))
+		{
+			options->group_count = static_cast<u32>(value);
+			options->group_count_explicit = true;
+		}
 		else
 			return false;
 		++index;
@@ -108,7 +116,7 @@ int main(int argc, char** argv)
 	if (argc == 2 && std::string_view(argv[1]) == "--help")
 	{
 		std::printf("Usage: %s [device] [--device N] [--warmup-ms N] "
-			"[--sample-ms N] [--samples N] [--blocks N]\n", argv[0]);
+			"[--sample-ms N] [--samples N] [--blocks N] [--groups N]\n", argv[0]);
 		return EXIT_SUCCESS;
 	}
 	BenchmarkOptions options;
@@ -122,9 +130,14 @@ int main(int argc, char** argv)
 	hipDeviceProp_t properties{};
 	if (!CheckHip(hipGetDeviceProperties(&properties, options.device_index), "hipGetDeviceProperties"))
 		return EXIT_FAILURE;
+	const rckangaroo::hip::ArchitectureTuning tuning =
+		rckangaroo::hip::SelectArchitectureTuning(properties.gcnArchName);
+	if (!options.group_count_explicit)
+		options.group_count = tuning.point_group_count;
 
-	const u32 block_count = options.block_count ? options.block_count : properties.multiProcessorCount;
-	const u32 kangaroo_count = block_count * BLOCK_SIZE * PNT_GROUP_CNT;
+	const u32 block_count = options.block_count ? options.block_count :
+		properties.multiProcessorCount * BLOCKS_PER_CU;
+	const u32 kangaroo_count = block_count * BLOCK_SIZE * options.group_count;
 	const size_t coordinate_words = static_cast<size_t>(kangaroo_count) * 4;
 	std::vector<u64> initial_l2(static_cast<size_t>(kangaroo_count) * 12, 0);
 	for (u32 index = 0; index < kangaroo_count; ++index)
@@ -147,11 +160,11 @@ int main(int argc, char** argv)
 	TKparams params{};
 	params.BlockCnt = block_count;
 	params.BlockSize = BLOCK_SIZE;
-	params.GroupCnt = PNT_GROUP_CNT;
+	params.GroupCnt = options.group_count;
 	params.KangCnt = kangaroo_count;
 	params.iter_cnt = 1;
 	params.dp_mask = 0xFFFFFFFFu;
-	params.KernelA_LDS_Size = 8 * JMP_CNT * sizeof(u64);
+	params.KernelA_LDS_Size = tuning.kernel_a_lds_bytes;
 	const size_t l2_bytes = initial_l2.size() * sizeof(u64);
 	const size_t l1s2_bytes = static_cast<size_t>(block_count) * BLOCK_SIZE * sizeof(u32);
 	const size_t jump_list_bytes = static_cast<size_t>(kangaroo_count) *
@@ -233,9 +246,9 @@ int main(int argc, char** argv)
 		deviations.push_back(std::abs(value - median_mkeys));
 	const double mad_mkeys = Median(deviations);
 	std::printf("GPU %d: %s (%s), %u CUs\n", options.device_index, properties.name,
-		properties.gcnArchName, block_count);
+		properties.gcnArchName, properties.multiProcessorCount);
 	std::printf("Geometry: %u blocks, %u threads, %u groups, %u kangaroos, 1 step\n",
-		block_count, BLOCK_SIZE, PNT_GROUP_CNT, kangaroo_count);
+		block_count, BLOCK_SIZE, options.group_count, kangaroo_count);
 	std::printf("Protocol: %d ms warm-up (%d launches), %d x %d ms samples\n",
 		options.warmup_ms, warmup_launches, options.sample_count, options.sample_ms);
 	for (int sample = 0; sample < options.sample_count; ++sample)
@@ -244,12 +257,18 @@ int main(int argc, char** argv)
 	std::printf("KernelA portable baseline: %.3f ms, %.3f MKeys/s median, %.3f MAD\n",
 		median_ms, median_mkeys, mad_mkeys);
 	std::printf("RCK_BENCHMARK_JSON={\"schema\":1,\"device\":%d,\"gpu\":\"%s\","
-		"\"arch\":\"%s\",\"blocks\":%u,\"threads\":%u,\"groups\":%u,"
+		"\"arch\":\"%s\",\"compute_units\":%d,\"blocks\":%u,"
+		"\"configured_blocks_per_cu\":%u,\"threads\":%u,\"groups\":%u,"
+		"\"configured_groups\":%u,\"table_mode\":%d,\"lds_bytes\":%zu,"
+		"\"state_layout\":%d,"
 		"\"iterations\":1,\"kangaroos\":%u,\"warmup_ms\":%d,\"sample_ms\":%d,"
 		"\"samples\":%d,\"median_kernel_ms\":%.6f,\"median_mkeys_per_second\":%.6f,"
 		"\"mad_mkeys_per_second\":%.6f,\"sample_mkeys_per_second\":[",
-		options.device_index, properties.name, properties.gcnArchName, block_count,
-		BLOCK_SIZE, PNT_GROUP_CNT, kangaroo_count, options.warmup_ms, options.sample_ms,
+		options.device_index, properties.name, properties.gcnArchName,
+		properties.multiProcessorCount, block_count, BLOCKS_PER_CU, BLOCK_SIZE,
+		options.group_count, tuning.point_group_count, tuning.kernel_a_table_mode,
+		static_cast<size_t>(tuning.kernel_a_lds_bytes), tuning.state_layout, kangaroo_count,
+		options.warmup_ms, options.sample_ms,
 		options.sample_count, median_ms, median_mkeys, mad_mkeys);
 	for (int sample = 0; sample < options.sample_count; ++sample)
 		std::printf("%s%.6f", sample ? "," : "", sample_mkeys[sample]);

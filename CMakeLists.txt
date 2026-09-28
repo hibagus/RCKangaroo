@@ -24,6 +24,84 @@ option(RCK_BUILD_HIP "Build the native HIP executable" OFF)
 option(RCK_ENABLE_SLOW_GPU_TESTS "Enable long-running HIP solver acceptance tests" OFF)
 set(RCK_HIP_ARCHITECTURES "gfx942;gfx950" CACHE STRING
     "AMD GPU targets for the HIP backend")
+set(RCK_BLOCK_SIZE "256" CACHE STRING "HIP kernel workgroup size")
+set(RCK_POINT_GROUP_COUNT "24" CACHE STRING "Points processed by each HIP lane")
+set(RCK_STEP_COUNT "1000" CACHE STRING "Kangaroo steps processed per solver launch")
+set(RCK_BLOCKS_PER_CU "1" CACHE STRING "HIP workgroups launched per compute unit")
+set(RCK_GFX942_POINT_GROUP_COUNT "24" CACHE STRING "Default points per lane on gfx942")
+set(RCK_GFX950_POINT_GROUP_COUNT "32" CACHE STRING "Default points per lane on gfx950")
+set(RCK_GFX942_STEP_COUNT "1000" CACHE STRING "Default solver steps per launch on gfx942")
+set(RCK_GFX950_STEP_COUNT "2048" CACHE STRING "Default solver steps per launch on gfx950")
+set(RCK_KERNEL_A_TABLE_MODE "split" CACHE STRING
+    "KernelA jump-table storage: split, global, or lds64")
+option(RCK_USE_ARCH_TABLE_DEFAULTS
+    "Use split tables on gfx942 and 64 KiB LDS tables on gfx950" ON)
+set(RCK_STATE_LAYOUT "group" CACHE STRING
+    "GPU state layout: group or workgroup")
+option(RCK_USE_ARCH_STATE_LAYOUT_DEFAULTS
+    "Use group-major state on gfx942 and workgroup-major state on gfx950" ON)
+set_property(CACHE RCK_BLOCK_SIZE PROPERTY STRINGS 64 128 256)
+set_property(CACHE RCK_POINT_GROUP_COUNT PROPERTY STRINGS 8 12 16 24 32)
+set_property(CACHE RCK_STEP_COUNT PROPERTY STRINGS 256 512 1000 2048)
+set_property(CACHE RCK_KERNEL_A_TABLE_MODE PROPERTY STRINGS split global lds64)
+set_property(CACHE RCK_STATE_LAYOUT PROPERTY STRINGS group workgroup)
+
+if(RCK_KERNEL_A_TABLE_MODE STREQUAL "split")
+    set(RCK_KERNEL_A_TABLE_MODE_VALUE 0)
+elseif(RCK_KERNEL_A_TABLE_MODE STREQUAL "global")
+    set(RCK_KERNEL_A_TABLE_MODE_VALUE 1)
+elseif(RCK_KERNEL_A_TABLE_MODE STREQUAL "lds64")
+    set(RCK_KERNEL_A_TABLE_MODE_VALUE 2)
+else()
+    message(FATAL_ERROR "RCK_KERNEL_A_TABLE_MODE must be split, global, or lds64")
+endif()
+if(RCK_USE_ARCH_TABLE_DEFAULTS)
+    set(RCK_USE_ARCH_TABLE_DEFAULTS_VALUE 1)
+else()
+    set(RCK_USE_ARCH_TABLE_DEFAULTS_VALUE 0)
+endif()
+if(RCK_USE_ARCH_STATE_LAYOUT_DEFAULTS)
+    set(RCK_USE_ARCH_STATE_LAYOUT_DEFAULTS_VALUE 1)
+else()
+    set(RCK_USE_ARCH_STATE_LAYOUT_DEFAULTS_VALUE 0)
+endif()
+if(RCK_STATE_LAYOUT STREQUAL "group")
+    set(RCK_STATE_LAYOUT_VALUE 0)
+elseif(RCK_STATE_LAYOUT STREQUAL "workgroup")
+    set(RCK_STATE_LAYOUT_VALUE 1)
+else()
+    message(FATAL_ERROR "RCK_STATE_LAYOUT must be group or workgroup")
+endif()
+
+if(NOT RCK_BLOCK_SIZE MATCHES "^(64|128|256)$")
+    message(FATAL_ERROR "RCK_BLOCK_SIZE must be 64, 128, or 256")
+endif()
+if(RCK_POINT_GROUP_COUNT LESS 2 OR RCK_POINT_GROUP_COUNT GREATER 32)
+    message(FATAL_ERROR "RCK_POINT_GROUP_COUNT must be between 2 and 32")
+endif()
+math(EXPR RCK_POINT_GROUP_REMAINDER "${RCK_POINT_GROUP_COUNT} % 2")
+if(NOT RCK_POINT_GROUP_REMAINDER EQUAL 0)
+    message(FATAL_ERROR "RCK_POINT_GROUP_COUNT must be even")
+endif()
+if(RCK_STEP_COUNT LESS 1)
+    message(FATAL_ERROR "RCK_STEP_COUNT must be positive")
+endif()
+if(RCK_BLOCKS_PER_CU LESS 1)
+    message(FATAL_ERROR "RCK_BLOCKS_PER_CU must be positive")
+endif()
+foreach(RCK_TARGET_GROUP_COUNT IN ITEMS
+        RCK_GFX942_POINT_GROUP_COUNT RCK_GFX950_POINT_GROUP_COUNT)
+    if(${RCK_TARGET_GROUP_COUNT} LESS 2 OR ${RCK_TARGET_GROUP_COUNT} GREATER 32)
+        message(FATAL_ERROR "${RCK_TARGET_GROUP_COUNT} must be between 2 and 32")
+    endif()
+    math(EXPR RCK_TARGET_GROUP_REMAINDER "${${RCK_TARGET_GROUP_COUNT}} % 2")
+    if(NOT RCK_TARGET_GROUP_REMAINDER EQUAL 0)
+        message(FATAL_ERROR "${RCK_TARGET_GROUP_COUNT} must be even")
+    endif()
+endforeach()
+if(RCK_GFX942_STEP_COUNT LESS 1 OR RCK_GFX950_STEP_COUNT LESS 1)
+    message(FATAL_ERROR "Architecture step counts must be positive")
+endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CompilerWarnings)
@@ -44,6 +122,24 @@ target_include_directories(rckangaroo_core PUBLIC
 )
 
 target_link_libraries(rckangaroo_core PUBLIC Threads::Threads)
+target_compile_definitions(rckangaroo_core PUBLIC
+    RCK_BLOCK_SIZE=${RCK_BLOCK_SIZE}
+    RCK_POINT_GROUP_COUNT=${RCK_POINT_GROUP_COUNT}
+    RCK_STEP_COUNT=${RCK_STEP_COUNT}
+    RCK_BLOCKS_PER_CU=${RCK_BLOCKS_PER_CU}
+    RCK_GFX942_POINT_GROUP_COUNT=${RCK_GFX942_POINT_GROUP_COUNT}
+    RCK_GFX950_POINT_GROUP_COUNT=${RCK_GFX950_POINT_GROUP_COUNT}
+    RCK_GFX942_STEP_COUNT=${RCK_GFX942_STEP_COUNT}
+    RCK_GFX950_STEP_COUNT=${RCK_GFX950_STEP_COUNT}
+    RCK_KERNEL_A_TABLE_MODE=${RCK_KERNEL_A_TABLE_MODE_VALUE}
+    RCK_USE_ARCH_TABLE_DEFAULTS=${RCK_USE_ARCH_TABLE_DEFAULTS_VALUE}
+    RCK_GFX942_KERNEL_A_TABLE_MODE=0
+    RCK_GFX950_KERNEL_A_TABLE_MODE=2
+    RCK_STATE_LAYOUT=${RCK_STATE_LAYOUT_VALUE}
+    RCK_USE_ARCH_STATE_LAYOUT_DEFAULTS=${RCK_USE_ARCH_STATE_LAYOUT_DEFAULTS_VALUE}
+    RCK_GFX942_STATE_LAYOUT=0
+    RCK_GFX950_STATE_LAYOUT=1
+)
 if(UNIX AND NOT APPLE)
     target_link_libraries(rckangaroo_core PUBLIC rt)
 endif()
