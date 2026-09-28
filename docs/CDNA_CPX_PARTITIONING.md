@@ -4,22 +4,31 @@ Measured with the node switched to `CPX` compute partitioning and `NPS4` memory
 partitioning. This was the last untested item from the port plan's Phase 3; setting it
 requires root (`rocm-smi --setcomputepartition CPX`).
 
-## Result: worth about 3-5%
+## Result: worth about 5.5%
 
 | Partition mode | Logical devices | CUs each | Throughput (puzzle #140) |
 |---|---|---|---|
 | SPX / NPS1 | 8 | 304 | 81,000 MKeys/s |
-| **CPX / NPS4** | **63** | **38** | **83,468 MKeys/s** |
+| **CPX / NPS4** | **64** | **38** | **85,452 MKeys/s** |
 
-That is +2.9% as measured, but on 63 of 64 available partitions (see below). Normalising to
-the full complement gives roughly **84,800 MKeys/s, about +4.7%**.
+**+5.5%**, and it scales linearly across the whole node:
 
-Per-CU it is the cleaner comparison: SPX delivers 1,266 MKeys/s per 38 CUs, CPX delivers
-1,318 - about 4% better.
+| Partitions | MKeys/s | per partition | vs 16 partitions |
+|---|---|---|---|
+| 16 | 21,177 | 1,323.6 | 100.0% |
+| 32 | 42,085 | 1,315.2 | 99.4% |
+| 48 | 63,837 | 1,329.9 | 100.5% |
+| 64 | **85,452** | 1,335.2 | **100.9%** |
 
-Correctness holds. Under a deliberately high DP rate (dp 16, range 80, 45 million
-distinguished points collected) the solver still solves with zero errors, so the host side
-copes with 63 worker threads contending on the shared DP database rather than 8.
+There is no contention penalty from running 64 logical devices - per-partition throughput at
+64 is marginally *better* than at 16. Note this needs a long enough sampling window: the
+solver averages speed over a 16-entry ring initialised to zero, so readings taken before
+about nine reports are low. A first measurement of this configuration gave 83,404 purely
+because it was sampled too early.
+
+Correctness holds. Under a deliberately high DP rate (dp 16, range 80, 55 million
+distinguished points collected across 64 devices) the solver solves with zero errors, so
+the host copes with 64 worker threads contending on the shared DP database rather than 8.
 
 Each logical device reports 24 GB and allocates 2,802 MB at the default
 `PNT_GROUP_CNT=32` / 3 blocks per CU, for 933,888 kangaroos per XCD.
@@ -36,7 +45,7 @@ space. Two consequences:
   present, which is always the case in SPX. In CPX there is one L2 per device, so they can
   hit it.
 
-The gain is small because neither of those is the bottleneck. The working set per device is
+The gain is modest because neither of those is the bottleneck. The working set per device is
 90 MB against a 4 MB L2, so it still misses to HBM; the state array remains
 non-resident, which the residency experiments elsewhere showed does not matter anyway; and
 the device-scope traffic is almost entirely the DP-table atomics, which fire once per
@@ -47,8 +56,11 @@ distinguished point - roughly one jump in 2^30 at dp=30.
 - Requires root to set, and it is a node-wide mode change.
 - Device count goes from 8 to 64, so `MAX_GPU_CNT` had to rise from 32 to 64 on the AMD
   path. Anything that indexes GPUs by number (the `-gpu` mask) changes meaning.
-- 63 host threads instead of 8. No measured problem, but it is more CPU pressure on the DP
-  database.
+- 64 host threads instead of 8. No measured problem - scaling is linear and a 55-million-DP
+  run completed cleanly - but it is more CPU pressure on the DP database.
+- **The `-gpu` option cannot address devices above 9.** It parses a string of digits, so
+  "035" means devices 0, 3 and 5. That is adequate for 8 GPUs and unusable for 64. Selecting
+  a subset currently requires `HIP_VISIBLE_DEVICES` instead.
 
 Given +3-5% for a privileged node-wide reconfiguration, this is worth taking if the node is
 dedicated to this workload and not otherwise.
