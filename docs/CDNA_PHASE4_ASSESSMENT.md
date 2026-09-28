@@ -4,9 +4,12 @@ Phase 4 in the port plan is writing KernelA's inner loop as a single assembly ro
 explicit register allocation - what RC's `main.asm` is. It is a large undertaking, so
 before starting it the question was which cost it would actually remove.
 
-**Conclusion: it targets the wrong thing.** KernelA's dominant cost is memory traffic, not
-instruction count, and the traffic is not reducible. Realistic remaining headroom is
-roughly 10-20%, and Phase 4 addresses only part of that.
+**Conclusion (revised): it is worth doing, incrementally.** An earlier version of this
+document concluded the opposite - that Phase 4 targeted the wrong cost - on the grounds
+that memory traffic dominates. That inference was wrong, and the correction is recorded in
+"Marginal value of instruction reduction" below: removing instructions converts to
+throughput almost 1:1, because memory and compute overlap rather than adding. Expect
+roughly +12-35%.
 
 ## Ablation of KernelA
 
@@ -89,21 +92,66 @@ Phase 4 at roughly **+40% in the best case and realistically much less**, for a 
 ~2,500 lines of hand-scheduled assembly with no differential test able to cover it - only
 K-value and solve checks.
 
+## Marginal value of instruction reduction
+
+The ablation above shows memory traffic costs 42% of runtime. It is tempting to conclude
+from that alone that reducing instructions cannot help much. That does not follow, and
+measuring it directly gives the opposite answer.
+
+This experiment drops arithmetic while keeping every memory access and the loop structure
+identical, so only the instruction count moves. Measured on one CPX partition (38 CUs), so
+the absolute figures are per-XCD; the ratios are the point.
+
+| Variant | Instructions | MKeys/s | instruction ratio | speed ratio |
+|---|---|---|---|---|
+| baseline | 3,023 | 2,266 | - | - |
+| -1 multiply | 2,778 | 2,482 | 1.088x | 1.095x |
+| -2 multiplies | 2,532 | 2,705 | 1.194x | 1.194x |
+| -3 multiplies | 2,274 | 2,900 | 1.329x | 1.280x |
+
+**Instruction reduction converts to throughput at 96-100% efficiency.** Memory and compute
+overlap; their costs are not additive. So the 42% memory figure and a near-linear response
+to instruction count are both true, and the kernel is instruction-bound at the margin.
+
+Two ceilings, which an earlier version of this document conflated:
+
+| | GH/s |
+|---|---|
+| Instruction-bound, memory free (the ablation) | 14.2 |
+| Memory-bound, instructions free (220 B/point-add at 3.5-4.0 TB/s) | 16-18 |
+
+14.2 is not an absolute wall - it is the wall at the *current* instruction count.
+
 ## Recommendation
 
-Do not start Phase 4 as the next step. The evidence says the arithmetic is done (87% of
-VALU peak in isolation), the bookkeeping is free, the memory traffic is irreducible, and
-the layout is already right.
+Phase 4 is worth doing. Cutting the 347 register moves and 363 wait states per group body
+is about 1.44x fewer instructions, which at the measured conversion rate is roughly
+**11-13.5 GH/s per GPU, 93-112 GH/s for the node**.
 
-The cheap items that remain:
+But not as a single monolithic hand-scheduled kernel, at least not first. The reason is
+testability: every primitive today has defined semantics and is checked against Python
+arbitrary-precision ground truth over 10,000,000 vectors. A monolithic kernel has no such
+reference - only K values and solve counts, which are statistical, and which would let a
+subtle distance-accounting bug hide as "slightly worse K" rather than fail outright.
 
-- **CPX compute partitioning is still untested.** It needs root
-  (`rocm-smi --setcomputepartition`), which was not available. It is the one structural
-  change not yet measured: eight logical devices of 38 CUs, each one XCD with a private
-  4 MB L2 and all traffic XCD-local. `MAX_GPU_CNT` has been raised to 64 on the AMD path so
-  a node enumerates correctly under it. Expect little given the residency results, but it
-  is untested rather than ruled out.
-- **jmp_y back in LDS**, trading 32 of 224 bytes per point-addition against a wave of
+Staged instead, each step keeping the differential harness applicable:
+
+1. Fuse `SubModP` into `MulModP` as `SubMulModP(res, a, b, c) = ((a - b) mod p) * c mod p`.
+   It occurs four times per group, has well-defined semantics so it remains fully testable,
+   and removes the intermediate's eight register moves per site.
+2. Measure against the predicted saving. If the model holds, widen the fusion - the whole
+   back-substitution step, then the elliptic-curve addition tail.
+3. Consider a monolithic kernel only if 1 and 2 confirm the response stays linear as the
+   blocks grow.
+
+Stop at the first step where the measured return stops matching the model. That is what
+happened with software pipelining, the contiguous layout, and cache residency, and it is
+cheaper to discover early.
+
+## Still open
+
+- **CPX partitioning: measured, worth +3-5%.** See docs/CDNA_CPX_PARTITIONING.md.
+- **jmp_y back in LDS**, trading 32 of 220 bytes per point-addition against a wave of
   occupancy. Small and unmeasured.
 - **Host-side usability** carried over from AMDKangaroo: dynamic DP validation, per-GPU
   statistics, progress display.
