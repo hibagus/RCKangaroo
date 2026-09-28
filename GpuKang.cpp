@@ -53,16 +53,20 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 		return false;
 
 #ifndef __HIP_PLATFORM_AMD__
-	char path[500];
-	path[0] = 0;
-//	GetExeDir(path, 500);
-//	strcat(path, "/");
-	if (Is5xxx)
-		strcat(path, "kernel_sm120.cubin");
-	else
-		strcat(path, "kernel_sm89.cubin");
-	if (!cc.LoadCubin(path))
-		return false;
+	// Only load the prebuilt SASS kernels when they will actually be used.
+	if (sm_inv_cnt)
+	{
+		char path[500];
+		path[0] = 0;
+//		GetExeDir(path, 500);
+//		strcat(path, "/");
+		if (Is5xxx)
+			strcat(path, "kernel_sm120.cubin");
+		else
+			strcat(path, "kernel_sm89.cubin");
+		if (!cc.LoadCubin(path))
+			return false;
+	}
 #endif
 
 	Kparams.BlockCnt = mpCnt - sm_inv_cnt;
