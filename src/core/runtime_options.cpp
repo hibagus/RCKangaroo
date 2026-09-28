@@ -25,6 +25,26 @@ bool ParseUnsigned(std::string_view text, std::uint64_t& value)
     return result.ec == std::errc{} && result.ptr == end;
 }
 
+bool AppendGpuIndex(std::string_view text,
+                    std::vector<int>& gpu_indices,
+                    std::string& error)
+{
+    std::uint64_t value = 0;
+    if (!ParseUnsigned(text, value) || value >= 32) {
+        error = "GPU index must be between 0 and 31: " + std::string(text);
+        return false;
+    }
+    const int index = static_cast<int>(value);
+    for (const int existing : gpu_indices) {
+        if (existing == index) {
+            error = "duplicate GPU index: " + std::to_string(index);
+            return false;
+        }
+    }
+    gpu_indices.push_back(index);
+    return true;
+}
+
 RuntimeOptionParseResult ParseValue(
     std::string_view option_name,
     int argc,
@@ -54,6 +74,52 @@ RuntimeOptionParseResult ParseValue(
 
 } // namespace
 
+bool ParseGpuList(std::string_view text,
+                  bool legacy_compact,
+                  std::vector<int>& gpu_indices,
+                  std::string& error)
+{
+    gpu_indices.clear();
+    error.clear();
+    if (text.empty()) {
+        error = "GPU list is empty";
+        return false;
+    }
+
+    if (legacy_compact && text.find(',') == std::string_view::npos &&
+        text.size() > 1) {
+        for (const char character : text) {
+            if (character < '0' || character > '9' ||
+                !AppendGpuIndex(std::string_view(&character, 1), gpu_indices,
+                                error)) {
+                if (error.empty()) {
+                    error = "invalid compact GPU list: " + std::string(text);
+                }
+                return false;
+            }
+        }
+        return true;
+    }
+
+    std::size_t offset = 0;
+    while (offset < text.size()) {
+        const std::size_t comma = text.find(',', offset);
+        const std::size_t end = comma == std::string_view::npos ? text.size() : comma;
+        if (!AppendGpuIndex(text.substr(offset, end - offset), gpu_indices, error)) {
+            return false;
+        }
+        if (comma == std::string_view::npos) {
+            break;
+        }
+        offset = comma + 1;
+        if (offset == text.size()) {
+            error = "GPU list has an empty trailing token";
+            return false;
+        }
+    }
+    return true;
+}
+
 RuntimeOptionParseResult ParseRuntimeOption(
     std::string_view argument,
     int argc,
@@ -63,6 +129,19 @@ RuntimeOptionParseResult ParseRuntimeOption(
     std::string& error)
 {
     error.clear();
+    if (argument == "--gpu" || argument == "-gpu") {
+        if (next_index >= argc) {
+            error = "missing value after --gpu option";
+            return RuntimeOptionParseResult::error;
+        }
+        if (!ParseGpuList(argv[next_index], argument == "-gpu",
+                          options.gpu_indices, error)) {
+            return RuntimeOptionParseResult::error;
+        }
+        options.gpu_selection_specified = true;
+        ++next_index;
+        return RuntimeOptionParseResult::success;
+    }
     if (IsOption(argument, "--seed")) {
         const RuntimeOptionParseResult result =
             ParseValue("--seed", argc, argv, next_index, options.seed, true, error);

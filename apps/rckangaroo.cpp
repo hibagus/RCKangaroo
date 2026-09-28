@@ -4,7 +4,11 @@
 // https://github.com/RetiredC
 
 
+#include <atomic>
 #include <iostream>
+#include <mutex>
+#include <system_error>
+#include <thread>
 #include <vector>
 
 #include <hip/hip_runtime.h>
@@ -13,6 +17,7 @@
 #include "rckangaroo/config.hpp"
 #include "rckangaroo/utils.hpp"
 #include "rckangaroo/gpu/kangaroo.hpp"
+#include "rckangaroo/host_topology.hpp"
 #include "rckangaroo/runtime_options.hpp"
 
 
@@ -22,8 +27,7 @@ EcJMP EcJumps3[JMP_CNT];
 
 RCGpuKang* GpuKangs[MAX_GPU_CNT];
 int GpuCnt;
-volatile long ThrCnt;
-volatile bool gSolved;
+std::atomic<bool> gSolved{false};
 
 EcInt Int_HalfRange;
 EcPoint Pnt_HalfRange;
@@ -32,18 +36,15 @@ EcInt x32;
 EcPoint Pntx32;
 Ec ec;
 
-CriticalSection csAddPoints;
-u8* pPntList;
-u8* pPntList2;
-volatile int PntIndex;
 TFastBase db;
 EcPoint gPntToSolve;
 EcInt gPrivKey;
+std::mutex gSolutionMutex;
 
-volatile u64 TotalOps;
+u64 TotalOps;
 u64 TotalSolved;
-u32 gTotalErrors;
-volatile u64 PntTotalOps;
+std::atomic<u32> gTotalErrors{0};
+std::atomic<u64> PntTotalOps{0};
 bool IsBench;
 
 u32 gDP;
@@ -76,6 +77,9 @@ struct DBRec
 	u8 type; //0 - tame, 1 - wild1, 2 - wild2
 };
 #pragma pack(pop)
+
+void ConsumeDistinguishedPoints(const u32* data, u32 point_count,
+	u32 kangaroo_count, u64 operation_count, int worker_index);
 
 void InitGpus()
 {
@@ -144,128 +148,108 @@ void InitGpus()
 		GpuKangs[GpuCnt]->DeviceIndex = i;
 		GpuKangs[GpuCnt]->mpCnt = deviceProp.multiProcessorCount;
 		GpuKangs[GpuCnt]->JumperInd = GpuCnt;
+		GpuKangs[GpuCnt]->SetDistinguishedPointConsumer(ConsumeDistinguishedPoints);
 		GpuKangs[GpuCnt]->ApplyArchitectureTuning(deviceProp.gcnArchName);
 		if (gRuntimeOptions.point_groups)
 			GpuKangs[GpuCnt]->PointGroupCnt = static_cast<int>(gRuntimeOptions.point_groups);
 		if (gRuntimeOptions.kernel_steps)
 			GpuKangs[GpuCnt]->KernelStepCnt = static_cast<int>(gRuntimeOptions.kernel_steps);
+		char pci_bus_id[32]{};
+		if (hipDeviceGetPCIBusId(pci_bus_id, sizeof(pci_bus_id), i) == hipSuccess)
+		{
+			const std::vector<unsigned> cpus =
+				rckangaroo::DiscoverCpuAffinityForPci(pci_bus_id);
+			GpuKangs[GpuCnt]->WorkerCpu =
+				rckangaroo::SelectTopologyCpu(cpus, GpuCnt, false);
+			GpuKangs[GpuCnt]->ConsumerCpu =
+				rckangaroo::SelectTopologyCpu(cpus, GpuCnt, true);
+		}
 		printf("GPU %d: native HIP kernel path enabled; %d threads, %d groups, "
-			"%d steps, table mode %u, %u KiB LDS, %s state.\r\n", i, BLOCK_SIZE,
+			"%d steps, table mode %u, %u KiB LDS, %s state; host CPUs %d/%d.\r\n",
+			i, BLOCK_SIZE,
 			GpuKangs[GpuCnt]->PointGroupCnt, GpuKangs[GpuCnt]->KernelStepCnt,
 			GpuKangs[GpuCnt]->KernelATableMode, GpuKangs[GpuCnt]->KernelALdsBytes / 1024,
-			GpuKangs[GpuCnt]->StateLayout ? "workgroup-major" : "group-major");
+			GpuKangs[GpuCnt]->StateLayout ? "workgroup-major" : "group-major",
+			GpuKangs[GpuCnt]->WorkerCpu, GpuKangs[GpuCnt]->ConsumerCpu);
 		GpuCnt++;
 	}
 	printf("Total GPUs for work: %d\r\n", GpuCnt);
 }
-#ifdef _WIN32
-u32 __stdcall kang_thr_proc(void* data)
-{
-	RCGpuKang* Kang = (RCGpuKang*)data;
-	Kang->Execute();
-	InterlockedDecrement(&ThrCnt);
-	return 0;
-}
-#else
-void* kang_thr_proc(void* data)
-{
-	RCGpuKang* Kang = (RCGpuKang*)data;
-	Kang->Execute();
-	__sync_fetch_and_sub(&ThrCnt, 1);
-	return 0;
-}
-#endif
-void AddPointsToList(u32* data, int pnt_cnt, u32 KangCnt, u64 ops_cnt, int JumperInd)
-{
-	for (int i = 0; i < pnt_cnt; i++) //convert KangInd to KangType
-	{
-		u32* p = data + (GPU_DP_SIZE / 4) * i;
-		int KangInd = p[10];
-		p[10] = (KangInd < KangCnt / 3) ? TAME : WILD;
 
-		//optional: restart kang after DP
-		//GpuKangs[JumperInd]->ToRestartKangaroo(KangInd);
-	}
-	csAddPoints.Enter();
-	if (PntIndex + pnt_cnt >= MAX_CNT_LIST)
-	{
-		csAddPoints.Leave();
-		printf("DPs buffer overflow, some points lost, increase DP value!\r\n");
-		return;
-	}
-	memcpy(pPntList + GPU_DP_SIZE * PntIndex, data, pnt_cnt * GPU_DP_SIZE);
-	PntIndex += pnt_cnt;
-	PntTotalOps += ops_cnt;
-	csAddPoints.Leave();
-}
-
-bool Collision_SOTA(EcPoint& pnt, EcInt t, int TameType, EcInt w, int WildType, bool IsNeg)
+bool Collision_SOTA(EcPoint& pnt, EcInt t, int TameType, EcInt w,
+	int WildType, bool IsNeg, EcInt& private_key)
 {
+	(void)WildType;
 	if (IsNeg)
 		t.Neg();
 	if (TameType == TAME)
 	{
-		gPrivKey = t;
-		gPrivKey.Sub(w);
-		EcInt sv = gPrivKey;
-		EcPoint P = ec.MultiplyG(gPrivKey);
+		private_key = t;
+		private_key.Sub(w);
+		EcInt sv = private_key;
+		EcPoint P = ec.MultiplyG(private_key);
 		if (P.IsEqual(pnt))
 			return true;
-		gPrivKey = sv;
-		gPrivKey.Neg();
-		P = ec.MultiplyG(gPrivKey);
+		private_key = sv;
+		private_key.Neg();
+		P = ec.MultiplyG(private_key);
 		return P.IsEqual(pnt);
 	}
 	else
 	{
-		gPrivKey = t;
-		gPrivKey.Sub(w);
-		if (gPrivKey.data[4] >> 63)
-			gPrivKey.Neg();
-		gPrivKey.ShiftRight(1);
-		EcInt sv = gPrivKey;
-		EcPoint P = ec.MultiplyG(gPrivKey);
+		private_key = t;
+		private_key.Sub(w);
+		if (private_key.data[4] >> 63)
+			private_key.Neg();
+		private_key.ShiftRight(1);
+		EcInt sv = private_key;
+		EcPoint P = ec.MultiplyG(private_key);
 		if (P.IsEqual(pnt))
 			return true;
-		gPrivKey = sv;
-		gPrivKey.Neg();
-		P = ec.MultiplyG(gPrivKey);
+		private_key = sv;
+		private_key.Neg();
+		P = ec.MultiplyG(private_key);
 		return P.IsEqual(pnt);
 	}
 }
 
-void CheckNewPoints()
+void ConsumeDistinguishedPoints(const u32* data, u32 point_count,
+	u32 kangaroo_count, u64 operation_count, int worker_index)
 {
-	csAddPoints.Enter();
-	if (!PntIndex)
-	{
-		csAddPoints.Leave();
-		return;
-	}
-
-	int cnt = PntIndex;
-	memcpy(pPntList2, pPntList, GPU_DP_SIZE * cnt);
-	PntIndex = 0;
-	csAddPoints.Leave();
-
-	for (int i = 0; i < cnt; i++)
+	(void)worker_index;
+	PntTotalOps.fetch_add(operation_count, std::memory_order_relaxed);
+	for (u32 i = 0; i < point_count && !gSolved.load(std::memory_order_relaxed); ++i)
 	{
 		DBRec nrec;
-		u8* p = pPntList2 + i * GPU_DP_SIZE;
+		const u8* p = reinterpret_cast<const u8*>(data) + i * GPU_DP_SIZE;
 		memcpy(nrec.x, p, 12);
 		memcpy(nrec.d, p + 16, 22);
-		nrec.type = gGenMode ? TAME : p[40];
+		const u32 kangaroo_index =
+			reinterpret_cast<const u32*>(p)[10];
+		nrec.type = gGenMode ? TAME :
+			(kangaroo_index < kangaroo_count / 3 ? TAME : WILD);
 
-		DBRec* pref = (DBRec*)db.FindOrAddDataBlock((u8*)&nrec);
+		u8 existing[sizeof(DBRec) - 3]{};
+		const TFastBase::InsertResult insert_result =
+			db.FindOrAddDataBlockConcurrent(reinterpret_cast<u8*>(&nrec), existing);
+		if (insert_result == TFastBase::InsertResult::allocation_failed)
+		{
+			fprintf(stderr, "DP database allocation failed; stopping workers.\n");
+			gTotalErrors.fetch_add(1, std::memory_order_relaxed);
+			for (int gpu = 0; gpu < GpuCnt; ++gpu)
+				GpuKangs[gpu]->Stop();
+			return;
+		}
 		if (gGenMode)
 			continue;
-		if (pref)
+		if (insert_result == TFastBase::InsertResult::found)
 		{
 			//in db we dont store first 3 bytes so restore them
 			DBRec tmp_pref;
 			memcpy(&tmp_pref, &nrec, 3);
-			memcpy(((u8*)&tmp_pref) + 3, pref, sizeof(DBRec) - 3);
-			pref = &tmp_pref;
+			memcpy(reinterpret_cast<u8*>(&tmp_pref) + 3, existing,
+				sizeof(DBRec) - 3);
+			DBRec* pref = &tmp_pref;
 
 			if (pref->type == nrec.type)
 			{
@@ -273,7 +257,7 @@ void CheckNewPoints()
 					continue;
 
 				//if it's wild, we can find the key from the same type if distances are different
-				if (*(u64*)pref->d == *(u64*)nrec.d)
+				if (memcmp(pref->d, nrec.d, sizeof(u64)) == 0)
 					continue;
 				//else
 				//	ToLog("key found by same wild");
@@ -300,15 +284,23 @@ void CheckNewPoints()
 				WildType = nrec.type;
 			}
 
-			bool res = Collision_SOTA(gPntToSolve, t, TameType, w, WildType, false) || Collision_SOTA(gPntToSolve, t, TameType, w, WildType, true);
+			std::lock_guard<std::mutex> solution_lock(gSolutionMutex);
+			if (gSolved.load(std::memory_order_relaxed))
+				return;
+			EcInt private_key;
+			bool res = Collision_SOTA(gPntToSolve, t, TameType, w, WildType,
+				false, private_key) ||
+				Collision_SOTA(gPntToSolve, t, TameType, w, WildType, true,
+					private_key);
 			if (!res)
 			{
 				printf("Collision Error\r\n");
-				gTotalErrors++;
+				gTotalErrors.fetch_add(1, std::memory_order_relaxed);
 				continue;
 			}
-			gSolved = true;
-			break;
+			gPrivKey = private_key;
+			gSolved.store(true, std::memory_order_release);
+			return;
 		}
 	}
 }
@@ -345,7 +337,7 @@ void ShowStats(u64 tm_start, double exp_ops, double dp_val)
 	int hours = (int)(sec - days * (3600 * 24)) / 3600;
 	int min = (int)(sec - days * (3600 * 24) - hours * 3600) / 60;
 
-	printf("%sSpeed: %d MKeys/s, Err: %d, DPs: %lluK/%lluK, Time: %llud:%02dh:%02dm/%llud:%02dh:%02dm\r\n", gGenMode ? "GEN: " : (IsBench ? "BENCH: " : "MAIN: "), speed, gTotalErrors, db.GetBlockCnt()/1000, est_dps_cnt/1000, days, hours, min, exp_days, exp_hours, exp_min);
+	printf("%sSpeed: %d MKeys/s, Err: %u, DPs: %lluK/%lluK, Time: %llud:%02dh:%02dm/%llud:%02dh:%02dm\r\n", gGenMode ? "GEN: " : (IsBench ? "BENCH: " : "MAIN: "), speed, gTotalErrors.load(std::memory_order_relaxed), db.GetBlockCnt()/1000, est_dps_cnt/1000, days, hours, min, exp_days, exp_hours, exp_min);
 }
 
 bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
@@ -411,8 +403,7 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 	}
 
 	SetRndSeed(0); //use same seed to make tames from file compatible
-	PntTotalOps = 0;
-	PntIndex = 0;
+	PntTotalOps.store(0, std::memory_order_relaxed);
 //prepare jumps
 	EcInt minjump, t;
 	minjump.Set(1);
@@ -458,37 +449,53 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 
 //prepare GPUs
 	for (int i = 0; i < GpuCnt; i++)
+	{
+		GpuKangs[i]->InitializationSeed =
+			rckangaroo::DeriveSeed(gRunSeed, gSolveIndex,
+				static_cast<u64>(2 + GpuKangs[i]->DeviceIndex));
 		if (!GpuKangs[i]->Prepare(PntToSolve, Range, DP, EcJumps1, EcJumps2, EcJumps3))
 		{
 			GpuKangs[i]->Failed = true;
 			printf("GPU %d Prepare failed\r\n", GpuKangs[i]->DeviceIndex);
 		}
+	}
 
 	u64 tm0 = GetTickCount64();
 	printf("GPUs started...\r\n");
 
-#ifdef _WIN32
-	HANDLE thr_handles[MAX_GPU_CNT];
-#else
-	pthread_t thr_handles[MAX_GPU_CNT];
-#endif
-
-	u32 ThreadID;
-	gSolved = false;
-	ThrCnt = GpuCnt;
+	gSolved.store(false, std::memory_order_relaxed);
+	std::atomic<int> active_workers{0};
+	std::vector<std::thread> workers;
+	workers.reserve(GpuCnt);
 	for (int i = 0; i < GpuCnt; i++)
 	{
-#ifdef _WIN32
-		thr_handles[i] = (HANDLE)_beginthreadex(NULL, 0, kang_thr_proc, (void*)GpuKangs[i], 0, &ThreadID);
-#else
-		pthread_create(&thr_handles[i], NULL, kang_thr_proc, (void*)GpuKangs[i]);
-#endif
+		active_workers.fetch_add(1, std::memory_order_relaxed);
+		try
+		{
+			workers.emplace_back([i, &active_workers] {
+				GpuKangs[i]->Execute();
+				active_workers.fetch_sub(1, std::memory_order_release);
+			});
+		}
+		catch (const std::system_error& error)
+		{
+			active_workers.fetch_sub(1, std::memory_order_relaxed);
+			fprintf(stderr, "Could not start GPU %d worker: %s\n",
+				GpuKangs[i]->DeviceIndex, error.what());
+			gTotalErrors.fetch_add(1, std::memory_order_relaxed);
+			for (int gpu = 0; gpu < i; ++gpu)
+				GpuKangs[gpu]->Stop();
+			for (std::thread& worker : workers)
+				worker.join();
+			db.Clear();
+			return false;
+		}
 	}
 
+	bool workers_failed = false;
 	u64 tm_stats = GetTickCount64();
-	while (!gSolved)
+	while (!gSolved.load(std::memory_order_acquire))
 	{
-		CheckNewPoints();
 		if (IsDurationLimitReached())
 		{
 			gIsDurationLimit = true;
@@ -502,10 +509,18 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 			tm_stats = GetTickCount64();
 		}
 
-		if ((MaxTotalOps > 0.0) && (PntTotalOps > MaxTotalOps))
+		if ((MaxTotalOps > 0.0) &&
+			(static_cast<double>(PntTotalOps.load(std::memory_order_relaxed)) >
+			 MaxTotalOps))
 		{
 			gIsOpsLimit = true;
 			printf("Operations limit reached\r\n");
+			break;
+		}
+		if (active_workers.load(std::memory_order_acquire) == 0)
+		{
+			workers_failed = true;
+			printf("All GPU workers stopped before a solution was found\r\n");
 			break;
 		}
 	}
@@ -513,16 +528,8 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 	printf("Stopping work ...\r\n");
 	for (int i = 0; i < GpuCnt; i++)
 		GpuKangs[i]->Stop();
-	while (ThrCnt)
-		Sleep(10);
-	for (int i = 0; i < GpuCnt; i++)
-	{
-#ifdef _WIN32
-		CloseHandle(thr_handles[i]);
-#else
-		pthread_join(thr_handles[i], NULL);
-#endif
-	}
+	for (std::thread& worker : workers)
+		worker.join();
 
 	if (gIsOpsLimit || gIsDurationLimit)
 	{
@@ -538,8 +545,14 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 		db.Clear();
 		return false;
 	}
+	if (workers_failed || !gSolved.load(std::memory_order_acquire))
+	{
+		db.Clear();
+		return false;
+	}
 
-	K = (double)PntTotalOps / pow(2.0, Range / 2.0);
+	K = static_cast<double>(PntTotalOps.load(std::memory_order_relaxed)) /
+		pow(2.0, Range / 2.0);
 	printf("Point solved, K: %.3f (with DP and GPU overheads)\r\n\r\n", K);
 	db.Clear();
 	*pk_res = gPrivKey;
@@ -553,27 +566,6 @@ bool ParseCommandLine(int argc, char* argv[])
 	{
 		char* argument = argv[ci];
 		ci++;
-		if (strcmp(argument, "-gpu") == 0)
-		{
-			if (ci >= argc)
-			{
-				printf("error: missed value after -gpu option\r\n");
-				return false;
-			}
-			char* gpus = argv[ci];
-			ci++;
-			memset(gGPUs_Mask, 0, sizeof(gGPUs_Mask));
-			for (int i = 0; i < (int)strlen(gpus); i++)
-			{
-				if ((gpus[i] < '0') || (gpus[i] > '9'))
-				{
-					printf("error: invalid value for -gpu option\r\n");
-					return false;
-				}
-				gGPUs_Mask[gpus[i] - '0'] = 1;
-			}
-		}
-		else
 		if (strcmp(argument, "-dp") == 0)
 		{
 			int val = atoi(argv[ci]);
@@ -715,6 +707,12 @@ int main(int argc, char* argv[])
 	memset(gGPUs_Mask, 1, sizeof(gGPUs_Mask));
 	if (!ParseCommandLine(argc, argv))
 		return 0;
+	if (gRuntimeOptions.gpu_selection_specified)
+	{
+		memset(gGPUs_Mask, 0, sizeof(gGPUs_Mask));
+		for (const int gpu_index : gRuntimeOptions.gpu_indices)
+			gGPUs_Mask[gpu_index] = 1;
+	}
 
 	gRunSeed = gRuntimeOptions.seed_specified ? gRuntimeOptions.seed : GetTickCount64();
 	SetRndSeed(gRunSeed);
@@ -735,11 +733,9 @@ int main(int argc, char* argv[])
 		return 0;
 	}
 
-	pPntList = (u8*)malloc(MAX_CNT_LIST * GPU_DP_SIZE);
-	pPntList2 = (u8*)malloc(MAX_CNT_LIST * GPU_DP_SIZE);
 	TotalOps = 0;
 	TotalSolved = 0;
-	gTotalErrors = 0;
+	gTotalErrors.store(0, std::memory_order_relaxed);
 	IsBench = gPubKey.x.IsZero();
 	gRunStart = GetTickCount64();
 
@@ -850,7 +846,7 @@ int main(int argc, char* argv[])
 				printf("FATAL ERROR: Found key is wrong!\r\n");
 				break;
 			}
-			TotalOps += PntTotalOps;
+			TotalOps += PntTotalOps.load(std::memory_order_relaxed);
 			TotalSolved++;
 			gSolveIndex++;
 			u64 ops_per_pnt = TotalOps / TotalSolved;
@@ -863,6 +859,5 @@ label_end:
 	for (int i = 0; i < GpuCnt; i++)
 		delete GpuKangs[i];
 	DeInitEc();
-	free(pPntList2);
-	free(pPntList);
+	return 0;
 }

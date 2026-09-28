@@ -93,7 +93,18 @@ void* MemPool::AllocRec(u32* cmp_ptr)
 	{
 		if (pages.size() >= MAX_PAGES_CNT)
 			return NULL; //overflow
-		pages.push_back(malloc(MEM_PAGE_SIZE));
+		void* page = malloc(MEM_PAGE_SIZE);
+		if (!page)
+			return NULL;
+		try
+		{
+			pages.push_back(page);
+		}
+		catch (...)
+		{
+			free(page);
+			return NULL;
+		}
 		pnt = 0;
 	}
 	u32 page_ind = (u32)pages.size() - 1;
@@ -136,16 +147,12 @@ void TFastBase::Clear()
 			}
 		mps[i].Clear();
 	}
+	block_count.store(0, std::memory_order_relaxed);
 }
 
 u64 TFastBase::GetBlockCnt()
 {
-	u64 blockCount = 0;
-	for (int i = 0; i < 256; i++)
-		for (int j = 0; j < 256; j++)
-			for (int k = 0; k < 256; k++)
-			blockCount += lists[i][j][k].cnt;
-	return blockCount;
+	return block_count.load(std::memory_order_relaxed);
 }
 
 // http://en.cppreference.com/w/cpp/algorithm/lower_bound
@@ -184,13 +191,18 @@ u8* TFastBase::AddDataBlock(u8* data, int pos)
 			newcap = 0xFFFF;
 		if (newcap <= list->capacity)
 			return NULL; //failed
-		list->data = (u32*)realloc(list->data, newcap * sizeof(u32));
+		u32* resized = (u32*)realloc(list->data, newcap * sizeof(u32));
+		if (!resized)
+			return NULL;
+		list->data = resized;
 		list->capacity = newcap;
 	}
 	int first = (pos < 0) ? lower_bound(list, data[0], data + 3) : pos;
-	memmove(list->data + first + 1, list->data + first, (list->cnt - first) * sizeof(u32));
 	u32 cmp_ptr;
 	void* ptr = mps[data[0]].AllocRec(&cmp_ptr);
+	if (!ptr)
+		return NULL;
+	memmove(list->data + first + 1, list->data + first, (list->cnt - first) * sizeof(u32));
 	list->data[first] = cmp_ptr;
 	memcpy(ptr, data + 3, DB_REC_LEN);
 	list->cnt++;
@@ -199,7 +211,6 @@ u8* TFastBase::AddDataBlock(u8* data, int pos)
 
 u8* TFastBase::FindDataBlock(u8* data)
 {
-	bool res = false;
 	TListRec* list = &lists[data[0]][data[1]][data[2]];
 	int first = lower_bound(list, data[0], data + 3);
 	if (first == list->cnt)
@@ -222,8 +233,25 @@ u8* TFastBase::FindOrAddDataBlock(u8* data)
 		goto label_not_found;
 	return (u8*)ptr;
 label_not_found:
-	AddDataBlock(data, first);
+	if (AddDataBlock(data, first))
+		block_count.fetch_add(1, std::memory_order_relaxed);
 	return NULL;
+}
+
+TFastBase::InsertResult TFastBase::FindOrAddDataBlockConcurrent(
+	u8* data, u8* existing_data)
+{
+	std::lock_guard<std::mutex> lock(shard_mutexes[data[0]]);
+	u8* existing = FindDataBlock(data);
+	if (existing)
+	{
+		memcpy(existing_data, existing, DB_REC_LEN);
+		return InsertResult::found;
+	}
+	if (!AddDataBlock(data))
+		return InsertResult::allocation_failed;
+	block_count.fetch_add(1, std::memory_order_relaxed);
+	return InsertResult::inserted;
 }
 
 //slow but I hope you are not going to create huge DB with this proof-of-concept software
@@ -243,7 +271,11 @@ bool TFastBase::LoadFromFile(char* fn)
 			for (int k = 0; k < 256; k++)
 			{
 				TListRec* list = &lists[i][j][k];
-				fread(&list->cnt, 1, 2, fp);
+				if (fread(&list->cnt, 1, 2, fp) != 2)
+				{
+					fclose(fp);
+					return false;
+				}
 				if (list->cnt)
 				{
 					u32 grow = list->cnt / 2;
@@ -252,19 +284,32 @@ bool TFastBase::LoadFromFile(char* fn)
 					u32 newcap = list->cnt + grow;
 					if (newcap > 0xFFFF)
 						newcap = 0xFFFF;
-					list->data = (u32*)realloc(list->data, newcap * sizeof(u32));
+					u32* resized = (u32*)realloc(list->data,
+						newcap * sizeof(u32));
+					if (!resized)
+					{
+						fclose(fp);
+						return false;
+					}
+					list->data = resized;
 					list->capacity = newcap;
 
 					for (int m = 0; m < list->cnt; m++)
 					{
 						u32 cmp_ptr;
 						void* ptr = mps[i].AllocRec(&cmp_ptr);
+						if (!ptr)
+						{
+							fclose(fp);
+							return false;
+						}
 						list->data[m] = cmp_ptr;
 						if (fread(ptr, 1, DB_REC_LEN, fp) != DB_REC_LEN)
 						{
 							fclose(fp);
 							return false;
 						}
+						block_count.fetch_add(1, std::memory_order_relaxed);
 					}
 				}
 			}
@@ -284,10 +329,14 @@ bool TFastBase::SaveToFile(char* fn)
 	}
 	for (int i = 0; i < 256; i++)
 		for (int j = 0; j < 256; j++)
-			for (int k = 0; k < 256; k++)
+		for (int k = 0; k < 256; k++)
 			{
 				TListRec* list = &lists[i][j][k];
-				fwrite(&list->cnt, 1, 2, fp);
+				if (fwrite(&list->cnt, 1, 2, fp) != 2)
+				{
+					fclose(fp);
+					return false;
+				}
 				for (int m = 0; m < list->cnt; m++)
 				{
 					void* ptr = mps[i].GetRecPtr(list->data[m]);

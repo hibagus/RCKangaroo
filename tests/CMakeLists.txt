@@ -41,6 +41,26 @@ endif()
 
 add_test(NAME rckangaroo.unit.runtime_options COMMAND rckangaroo_runtime_options_tests)
 
+add_executable(rckangaroo_host_pipeline_tests
+    unit/host_pipeline_tests.cpp
+)
+
+target_link_libraries(rckangaroo_host_pipeline_tests PRIVATE
+    RCKangaroo::core
+)
+
+if(MSVC)
+    target_compile_options(rckangaroo_host_pipeline_tests PRIVATE /W4)
+else()
+    target_compile_options(rckangaroo_host_pipeline_tests PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+    )
+endif()
+
+add_test(NAME rckangaroo.unit.host_pipeline COMMAND rckangaroo_host_pipeline_tests)
+
 add_executable(rckangaroo_kernel_params_abi_tests
     unit/kernel_params_abi_tests.cpp
 )

@@ -5,18 +5,22 @@
 
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <random>
+#include <system_error>
 #include <hip/hip_runtime.h>
 
 #include "rckangaroo/gpu/kangaroo.hpp"
 #include "rckangaroo/gpu/kernels.hpp"
 #include "rckangaroo/gpu/tuning.hpp"
+#include "rckangaroo/host_topology.hpp"
 
-void AddPointsToList(u32* data, int cnt, u32 KangCnt, u64 ops_cnt, int JumperInd);
 extern bool gGenMode; //tames generation mode
+extern std::atomic<u32> gTotalErrors;
 
 namespace
 {
@@ -60,6 +64,42 @@ ProfileStats Summarize(const std::vector<float>& values)
 	result.mad = Median(deviations);
 	return result;
 }
+
+void RandomBelow(EcInt& value, EcInt& maximum, std::mt19937_64& generator)
+{
+	int highest_limb = 3;
+	while (highest_limb >= 0 && !maximum.data[highest_limb])
+		--highest_limb;
+	if (highest_limb < 0)
+	{
+		value.SetZero();
+		return;
+	}
+
+	u64 high = maximum.data[highest_limb];
+	unsigned high_bits = 0;
+	while (high)
+	{
+		++high_bits;
+		high >>= 1;
+	}
+	do
+	{
+		value.SetZero();
+		for (int limb = 0; limb <= highest_limb; ++limb)
+			value.data[limb] = generator();
+		if (high_bits < 64)
+			value.data[highest_limb] &= (1ULL << high_bits) - 1ULL;
+	}
+	while (!value.IsLessThanU(maximum));
+}
+}
+
+RCGpuKang::~RCGpuKang()
+{
+	if (DeviceIndex >= 0)
+		CheckHip(hipSetDevice(DeviceIndex), DeviceIndex, "hipSetDevice(destructor)");
+	Release();
 }
 
 void RCGpuKang::ApplyArchitectureTuning(const char* architecture)
@@ -90,12 +130,14 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 	EcJumps1 = _EcJumps1;
 	EcJumps2 = _EcJumps2;
 	EcJumps3 = _EcJumps3;
-	StopFlag = false;
+	StopFlag.store(false, std::memory_order_relaxed);
 	Failed = false;
 	u64 total_mem = 0;
 	memset(dbg, 0, sizeof(dbg));
-	memset(SpeedStats, 0, sizeof(SpeedStats));
+	for (std::atomic<int>& speed : SpeedStats)
+		speed.store(0, std::memory_order_relaxed);
 	cur_stats_ind = 0;
+	LastCompletionTick = 0;
 	KernelGenMilliseconds = 0.0f;
 	KernelAMilliseconds.clear();
 	KernelBMilliseconds.clear();
@@ -108,15 +150,18 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 	err = hipStreamCreateWithFlags(&Stream, hipStreamNonBlocking);
 	if (!CheckHip(err, DeviceIndex, "hipStreamCreateWithFlags"))
 		return false;
+	err = hipStreamCreateWithFlags(&TransferStream, hipStreamNonBlocking);
+	if (!CheckHip(err, DeviceIndex, "hipStreamCreateWithFlags(transfer)"))
+		return false;
 	const char* profile_environment = std::getenv("RCK_PROFILE");
 	ProfilingEnabled = profile_environment && profile_environment[0] &&
 		std::strcmp(profile_environment, "0") != 0;
 	if (ProfilingEnabled)
 	{
-		if (!CheckHip(hipEventCreate(&ProfileStart), DeviceIndex, "hipEventCreate(profile start)") ||
-			!CheckHip(hipEventCreate(&ProfileAfterA), DeviceIndex, "hipEventCreate(profile A)") ||
-			!CheckHip(hipEventCreate(&ProfileAfterB), DeviceIndex, "hipEventCreate(profile B)") ||
-			!CheckHip(hipEventCreate(&ProfileAfterC), DeviceIndex, "hipEventCreate(profile C)"))
+		if (!CheckHip(hipEventCreate(&ProfileGenStart), DeviceIndex,
+				"hipEventCreate(profile generation start)") ||
+			!CheckHip(hipEventCreate(&ProfileGenStop), DeviceIndex,
+				"hipEventCreate(profile generation stop)"))
 			return false;
 	}
 
@@ -145,13 +190,7 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 		return false;
 	}
 	size = MAX_DP_CNT * GPU_DP_SIZE + 16;
-	total_mem += size;
-	err = hipMalloc((void**)&Kparams.DPs_out, size);
-	if (err != hipSuccess)
-	{
-		printf("GPU %d Allocate GpuOut memory failed: %s\n", DeviceIndex, hipGetErrorString(err));
-		return false;
-	}
+	total_mem += size * rckangaroo::DoubleBufferedOutputRing::slot_count;
 
 	total_mem += JMP_CNT * 96;
 	err = hipMalloc((void**)&Kparams.Jumps1, JMP_CNT * 96);
@@ -248,7 +287,6 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 		return false;
 	}
 
-	DPs_out = (u32*)malloc(MAX_DP_CNT * GPU_DP_SIZE);
 	/////////////////
 	size = JMP_CNT * 32 * 2 * 3;
 	total_mem += size;
@@ -390,14 +428,49 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 	return true;
 }
 
+bool RCGpuKang::AllocateOutputRing()
+{
+	const size_t output_bytes = MAX_DP_CNT * GPU_DP_SIZE + 16;
+	for (std::size_t index = 0; index < OutputSlots.size(); ++index)
+	{
+		OutputSlot& slot = OutputSlots[index];
+		if (!CheckHip(hipMalloc((void**)&slot.Device, output_bytes), DeviceIndex,
+				"hipMalloc(DP output ring)") ||
+			!CheckHip(hipHostMalloc((void**)&slot.Host, output_bytes, hipHostMallocDefault),
+				DeviceIndex, "hipHostMalloc(DP output ring)") ||
+			!CheckHip(hipEventCreateWithFlags(&slot.TransferDone, hipEventDisableTiming),
+				DeviceIndex, "hipEventCreate(DP transfer)"))
+			return false;
+
+		const unsigned compute_flags = ProfilingEnabled ? hipEventDefault : hipEventDisableTiming;
+		if (!CheckHip(hipEventCreateWithFlags(&slot.ComputeDone, compute_flags),
+				DeviceIndex, "hipEventCreate(compute done)"))
+			return false;
+		if (ProfilingEnabled &&
+			(!CheckHip(hipEventCreate(&slot.ProfileStart), DeviceIndex,
+					"hipEventCreate(profile start)") ||
+			 !CheckHip(hipEventCreate(&slot.ProfileAfterA), DeviceIndex,
+					"hipEventCreate(profile A)") ||
+			 !CheckHip(hipEventCreate(&slot.ProfileAfterB), DeviceIndex,
+					"hipEventCreate(profile B)")))
+			return false;
+	}
+	Kparams.DPs_out = OutputSlots[0].Device;
+	OutputRing.Reset();
+	return true;
+}
+
 void RCGpuKang::Release()
 {
+	if (ConsumerThread.joinable())
+		StopOutputConsumer(true);
 	free(RndPnts);
 	RndPnts = nullptr;
-	free(DPs_out);
-	DPs_out = nullptr;
 	if (Stream)
 		CheckHip(hipStreamSynchronize(Stream), DeviceIndex, "hipStreamSynchronize(release)");
+	if (TransferStream)
+		CheckHip(hipStreamSynchronize(TransferStream), DeviceIndex,
+			"hipStreamSynchronize(transfer release)");
 #define RCK_HIP_FREE(member) \
 	if (Kparams.member) { CheckHip(hipFree(Kparams.member), DeviceIndex, "hipFree(" #member ")"); Kparams.member = nullptr; }
 	RCK_HIP_FREE(LoopedKangs)
@@ -410,31 +483,48 @@ void RCGpuKang::Release()
 	RCK_HIP_FREE(Jumps3)
 	RCK_HIP_FREE(Jumps2)
 	RCK_HIP_FREE(Jumps1)
-	RCK_HIP_FREE(DPs_out)
 	RCK_HIP_FREE(L2)
 	RCK_HIP_FREE(dists)
 	RCK_HIP_FREE(Jumps12)
 	RCK_HIP_FREE(JmpDists12)
 #undef RCK_HIP_FREE
-	if (ProfileAfterC)
+	Kparams.DPs_out = nullptr;
+	for (OutputSlot& slot : OutputSlots)
 	{
-		CheckHip(hipEventDestroy(ProfileAfterC), DeviceIndex, "hipEventDestroy(profile C)");
-		ProfileAfterC = nullptr;
+		if (slot.ProfileAfterB)
+			CheckHip(hipEventDestroy(slot.ProfileAfterB), DeviceIndex,
+				"hipEventDestroy(profile B)");
+		if (slot.ProfileAfterA)
+			CheckHip(hipEventDestroy(slot.ProfileAfterA), DeviceIndex,
+				"hipEventDestroy(profile A)");
+		if (slot.ProfileStart)
+			CheckHip(hipEventDestroy(slot.ProfileStart), DeviceIndex,
+				"hipEventDestroy(profile start)");
+		if (slot.TransferDone)
+			CheckHip(hipEventDestroy(slot.TransferDone), DeviceIndex,
+				"hipEventDestroy(transfer done)");
+		if (slot.ComputeDone)
+			CheckHip(hipEventDestroy(slot.ComputeDone), DeviceIndex,
+				"hipEventDestroy(compute done)");
+		if (slot.Host)
+			CheckHip(hipHostFree(slot.Host), DeviceIndex, "hipHostFree(DP output ring)");
+		if (slot.Device)
+			CheckHip(hipFree(slot.Device), DeviceIndex, "hipFree(DP output ring)");
+		slot = {};
 	}
-	if (ProfileAfterB)
+	if (ProfileGenStop)
+		CheckHip(hipEventDestroy(ProfileGenStop), DeviceIndex,
+			"hipEventDestroy(profile generation stop)");
+	if (ProfileGenStart)
+		CheckHip(hipEventDestroy(ProfileGenStart), DeviceIndex,
+			"hipEventDestroy(profile generation start)");
+	ProfileGenStop = nullptr;
+	ProfileGenStart = nullptr;
+	if (TransferStream)
 	{
-		CheckHip(hipEventDestroy(ProfileAfterB), DeviceIndex, "hipEventDestroy(profile B)");
-		ProfileAfterB = nullptr;
-	}
-	if (ProfileAfterA)
-	{
-		CheckHip(hipEventDestroy(ProfileAfterA), DeviceIndex, "hipEventDestroy(profile A)");
-		ProfileAfterA = nullptr;
-	}
-	if (ProfileStart)
-	{
-		CheckHip(hipEventDestroy(ProfileStart), DeviceIndex, "hipEventDestroy(profile start)");
-		ProfileStart = nullptr;
+		CheckHip(hipStreamDestroy(TransferStream), DeviceIndex,
+			"hipStreamDestroy(transfer)");
+		TransferStream = nullptr;
 	}
 	if (Stream)
 	{
@@ -445,7 +535,7 @@ void RCGpuKang::Release()
 
 void RCGpuKang::Stop()
 {
-	StopFlag = true;
+	StopFlag.store(true, std::memory_order_relaxed);
 }
 
 void RCGpuKang::DoRestartKangs()
@@ -520,6 +610,7 @@ void RCGpuKang::DoRestartKangs()
 
 void RCGpuKang::GenerateRndDistances()
 {
+	std::mt19937_64 generator(InitializationSeed);
 	EcInt WildRange, x32;
 	x32.Set(1);
 	x32.ShiftLeft(Range - 5);
@@ -531,10 +622,10 @@ void RCGpuKang::GenerateRndDistances()
 	{
 		EcInt d;
 		if (i < KangCnt / 3)
-			d.RndMax(x32); //TAME kangs
+			RandomBelow(d, x32, generator); //TAME kangs
 		else
 		{
-			d.RndMax(WildRange);
+			RandomBelow(d, WildRange, generator);
 			d.data[0] &= 0xFFFFFFFFFFFFFFFE; //must be even
 		}
 		memcpy(RndPnts[i].priv, d.data, 24);
@@ -550,6 +641,8 @@ bool RCGpuKang::Start()
 	err = hipSetDevice(DeviceIndex);
 	if (!CheckHip(err, DeviceIndex, "hipSetDevice"))
 		return false;
+	if (!AllocateOutputRing())
+		return false;
 
 	HalfRange.Set(1);
 	HalfRange.ShiftLeft(Range - 1);
@@ -561,6 +654,12 @@ bool RCGpuKang::Start()
 	PntWild.y.NegModP(); //negate
 
 	RndPnts = (TPointPriv*)malloc(KangCnt * 96);
+	if (!RndPnts)
+	{
+		fprintf(stderr, "GPU %d, allocate random-point host memory failed\n",
+			DeviceIndex);
+		return false;
+	}
 	GenerateRndDistances();
 	// Calculate starting points on the GPU.
 	u8 buf_PntWild[64];
@@ -574,6 +673,12 @@ bool RCGpuKang::Start()
 	}
 
 	u8* gpu_pnts = (u8*)malloc(96 * KangCnt);
+	if (!gpu_pnts)
+	{
+		fprintf(stderr, "GPU %d, allocate initialization host memory failed\n",
+			DeviceIndex);
+		return false;
+	}
 	for (int i = 0; i < KangCnt; i++)
 	{
 		memcpy(gpu_pnts + 32 * i, RndPnts[i].x, 32);
@@ -590,14 +695,15 @@ bool RCGpuKang::Start()
 		return false;
 	}
 	if (ProfilingEnabled &&
-		!CheckHip(hipEventRecord(ProfileStart, Stream), DeviceIndex, "hipEventRecord(KernelGen start)"))
+		!CheckHip(hipEventRecord(ProfileGenStart, Stream), DeviceIndex,
+			"hipEventRecord(KernelGen start)"))
 	{
 		free(gpu_pnts);
 		return false;
 	}
 	err = LaunchKernelGen(Kparams, Stream);
 	if (!CheckHip(err, DeviceIndex, "LaunchKernelGen") ||
-		(ProfilingEnabled && !CheckHip(hipEventRecord(ProfileAfterA, Stream), DeviceIndex,
+		(ProfilingEnabled && !CheckHip(hipEventRecord(ProfileGenStop, Stream), DeviceIndex,
 			"hipEventRecord(KernelGen stop)")) ||
 		!CheckHip(hipStreamSynchronize(Stream), DeviceIndex, "hipStreamSynchronize(KernelGen)"))
 	{
@@ -605,7 +711,7 @@ bool RCGpuKang::Start()
 		return false;
 	}
 	if (ProfilingEnabled && !CheckHip(hipEventElapsedTime(&KernelGenMilliseconds,
-		ProfileStart, ProfileAfterA), DeviceIndex, "hipEventElapsedTime(KernelGen)"))
+		ProfileGenStart, ProfileGenStop), DeviceIndex, "hipEventElapsedTime(KernelGen)"))
 	{
 		free(gpu_pnts);
 		return false;
@@ -685,150 +791,208 @@ int RCGpuKang::Dbg_CheckKangs()
 
 #endif
 
-extern u32 gTotalErrors;
-
-//executes in separate thread
-void RCGpuKang::Execute()
+bool RCGpuKang::LaunchIteration(std::size_t slot_index)
 {
-	if (!CheckHip(hipSetDevice(DeviceIndex), DeviceIndex, "hipSetDevice"))
+	if (!OutputRing.Acquire(slot_index))
+		return false;
+	OutputSlot& slot = OutputSlots[slot_index];
+	Kparams.DPs_out = slot.Device;
+	DoRestartKangs();
+
+	if (!CheckHip(hipMemsetAsync(Kparams.DPs_out, 0, 4, Stream), DeviceIndex,
+			"hipMemsetAsync(DPs_out)") ||
+		!CheckHip(hipMemsetAsync(Kparams.DPTable, 0, KangCnt * sizeof(u32), Stream),
+			DeviceIndex, "hipMemsetAsync(DPTable)") ||
+		!CheckHip(hipMemsetAsync(Kparams.LoopedKangs, 0, 8, Stream), DeviceIndex,
+			"hipMemsetAsync(LoopedKangs)"))
 	{
-		gTotalErrors++;
-		return;
+		OutputRing.Abort();
+		return false;
 	}
 
-	if (!Start())
+	if (ProfilingEnabled &&
+		!CheckHip(hipEventRecord(slot.ProfileStart, Stream), DeviceIndex,
+			"hipEventRecord(KernelA start)"))
 	{
-		gTotalErrors++;
+		OutputRing.Abort();
+		return false;
+	}
+	if (!CheckHip(LaunchKernelA(Kparams, Stream), DeviceIndex, "LaunchKernelA") ||
+		(ProfilingEnabled && !CheckHip(hipEventRecord(slot.ProfileAfterA, Stream),
+			DeviceIndex, "hipEventRecord(KernelA stop)")) ||
+		!CheckHip(LaunchKernelB(Kparams, Stream), DeviceIndex, "LaunchKernelB") ||
+		(ProfilingEnabled && !CheckHip(hipEventRecord(slot.ProfileAfterB, Stream),
+			DeviceIndex, "hipEventRecord(KernelB stop)")) ||
+		!CheckHip(LaunchKernelC(Kparams, Stream), DeviceIndex, "LaunchKernelC") ||
+		!CheckHip(hipEventRecord(slot.ComputeDone, Stream), DeviceIndex,
+			"hipEventRecord(compute done)"))
+	{
+		OutputRing.Abort();
+		return false;
+	}
+
+	const size_t output_bytes = MAX_DP_CNT * GPU_DP_SIZE + 16;
+	if (!CheckHip(hipStreamWaitEvent(TransferStream, slot.ComputeDone, 0), DeviceIndex,
+			"hipStreamWaitEvent(DP transfer)") ||
+		!CheckHip(hipMemcpyAsync(slot.Host, slot.Device, output_bytes,
+			hipMemcpyDeviceToHost, TransferStream), DeviceIndex,
+			"hipMemcpyAsync(DP output ring)") ||
+		!CheckHip(hipEventRecord(slot.TransferDone, TransferStream), DeviceIndex,
+			"hipEventRecord(DP transfer done)"))
+	{
+		OutputRing.Abort();
+		return false;
+	}
+	slot.OperationCount = static_cast<u64>(KangCnt) * Kparams.iter_cnt;
+	return true;
+}
+
+bool RCGpuKang::FinishIteration(std::size_t slot_index)
+{
+	OutputSlot& slot = OutputSlots[slot_index];
+	if (!CheckHip(hipEventSynchronize(slot.TransferDone), DeviceIndex,
+			"hipEventSynchronize(DP transfer)"))
+	{
+		OutputRing.Abort();
+		return false;
+	}
+
+	if (ProfilingEnabled)
+	{
+		float kernel_a_ms = 0.0f;
+		float kernel_b_ms = 0.0f;
+		float kernel_c_ms = 0.0f;
+		if (!CheckHip(hipEventElapsedTime(&kernel_a_ms, slot.ProfileStart,
+				slot.ProfileAfterA), DeviceIndex, "hipEventElapsedTime(KernelA)") ||
+			!CheckHip(hipEventElapsedTime(&kernel_b_ms, slot.ProfileAfterA,
+				slot.ProfileAfterB), DeviceIndex, "hipEventElapsedTime(KernelB)") ||
+			!CheckHip(hipEventElapsedTime(&kernel_c_ms, slot.ProfileAfterB,
+				slot.ComputeDone), DeviceIndex, "hipEventElapsedTime(KernelC)"))
+		{
+			OutputRing.Abort();
+			return false;
+		}
+		KernelAMilliseconds.push_back(kernel_a_ms);
+		KernelBMilliseconds.push_back(kernel_b_ms);
+		KernelCMilliseconds.push_back(kernel_c_ms);
+	}
+
+	const rckangaroo::DistinguishedPointCount count =
+		rckangaroo::ClampDistinguishedPointCount(slot.Host[0], MAX_DP_CNT);
+	if (count.dropped)
+	{
+		printf("GPU %d, gpu DP buffer overflow, dropped %llu points; increase DP value!\r\n",
+			DeviceIndex, (unsigned long long)count.dropped);
+	}
+
+	const u64 completion_tick = GetTickCount64();
+	if (LastCompletionTick)
+	{
+		u64 elapsed = completion_tick - LastCompletionTick;
+		if (!elapsed)
+			elapsed = 1;
+		const int speed = static_cast<int>(slot.OperationCount / (elapsed * 1000));
+		SpeedStats[cur_stats_ind].store(speed, std::memory_order_relaxed);
+		cur_stats_ind = (cur_stats_ind + 1) % STATS_WND_SIZE;
+		if (ProfilingEnabled)
+			EndToEndMKeys.push_back(static_cast<float>(slot.OperationCount) /
+				(static_cast<float>(elapsed) * 1000.0f));
+	}
+	LastCompletionTick = completion_tick;
+	return OutputRing.Publish(slot_index);
+}
+
+void RCGpuKang::ConsumeOutputRing()
+{
+	std::string affinity_error;
+	if (!rckangaroo::PinCurrentThreadToCpu(ConsumerCpu, affinity_error))
+		fprintf(stderr, "GPU %d consumer affinity warning: %s\n", DeviceIndex,
+			affinity_error.c_str());
+
+	while (const std::optional<std::size_t> slot_index = OutputRing.Consume())
+	{
+		OutputSlot& slot = OutputSlots[*slot_index];
+		const rckangaroo::DistinguishedPointCount count =
+			rckangaroo::ClampDistinguishedPointCount(slot.Host[0], MAX_DP_CNT);
+		if (PointConsumer)
+			PointConsumer(slot.Host + 4, count.accepted, KangCnt,
+				slot.OperationCount, JumperInd);
+		if (!OutputRing.Release(*slot_index))
+		{
+			gTotalErrors.fetch_add(1, std::memory_order_relaxed);
+			break;
+		}
+	}
+}
+
+void RCGpuKang::StopOutputConsumer(bool abort)
+{
+	if (abort)
+		OutputRing.Abort();
+	else
+		OutputRing.Close();
+	if (ConsumerThread.joinable())
+		ConsumerThread.join();
+}
+
+// Executes in one GPU worker thread; DP processing runs in ConsumerThread.
+void RCGpuKang::Execute()
+{
+	std::string affinity_error;
+	if (!rckangaroo::PinCurrentThreadToCpu(WorkerCpu, affinity_error))
+		fprintf(stderr, "GPU %d worker affinity warning: %s\n", DeviceIndex,
+			affinity_error.c_str());
+	if (!CheckHip(hipSetDevice(DeviceIndex), DeviceIndex, "hipSetDevice"))
+	{
+		gTotalErrors.fetch_add(1, std::memory_order_relaxed);
 		Release();
 		return;
 	}
-#ifdef DEBUG_MODE
-	u64 iter = 1;
-#endif
-	hipError_t err;
-	while (!StopFlag)
+	if (!Start())
 	{
-		u64 t1 = GetTickCount64();
-		err = hipMemsetAsync(Kparams.DPs_out, 0, 4, Stream);
-		if (!CheckHip(err, DeviceIndex, "hipMemsetAsync(DPs_out)"))
-			break;
-		err = hipMemsetAsync(Kparams.DPTable, 0, KangCnt * sizeof(u32), Stream);
-		if (!CheckHip(err, DeviceIndex, "hipMemsetAsync(DPTable)"))
-			break;
-		err = hipMemsetAsync(Kparams.LoopedKangs, 0, 8, Stream);
-		if (!CheckHip(err, DeviceIndex, "hipMemsetAsync(LoopedKangs)"))
-			break;
-
-		if (ProfilingEnabled &&
-			!CheckHip(hipEventRecord(ProfileStart, Stream), DeviceIndex, "hipEventRecord(KernelA start)"))
-		{
-			gTotalErrors++;
-			break;
-		}
-		if (!CheckHip(LaunchKernelA(Kparams, Stream), DeviceIndex, "LaunchKernelA") ||
-			(ProfilingEnabled && !CheckHip(hipEventRecord(ProfileAfterA, Stream), DeviceIndex,
-				"hipEventRecord(KernelA stop)")) ||
-			!CheckHip(LaunchKernelB(Kparams, Stream), DeviceIndex, "LaunchKernelB") ||
-			(ProfilingEnabled && !CheckHip(hipEventRecord(ProfileAfterB, Stream), DeviceIndex,
-				"hipEventRecord(KernelB stop)")) ||
-			!CheckHip(LaunchKernelC(Kparams, Stream), DeviceIndex, "LaunchKernelC") ||
-			(ProfilingEnabled && !CheckHip(hipEventRecord(ProfileAfterC, Stream), DeviceIndex,
-				"hipEventRecord(KernelC stop)")))
-		{
-			gTotalErrors++;
-			break;
-		}
-		int cnt;
-		err = hipMemcpyAsync(&cnt, Kparams.DPs_out, 4, hipMemcpyDeviceToHost, Stream);
-		if (!CheckHip(err, DeviceIndex, "hipMemcpyAsync(DP count)") ||
-			!CheckHip(hipStreamSynchronize(Stream), DeviceIndex, "hipStreamSynchronize(iteration)"))
-		{
-			gTotalErrors++;
-			break;
-		}
-		if (ProfilingEnabled)
-		{
-			float kernel_a_ms = 0.0f;
-			float kernel_b_ms = 0.0f;
-			float kernel_c_ms = 0.0f;
-			if (!CheckHip(hipEventElapsedTime(&kernel_a_ms, ProfileStart, ProfileAfterA),
-				DeviceIndex, "hipEventElapsedTime(KernelA)") ||
-				!CheckHip(hipEventElapsedTime(&kernel_b_ms, ProfileAfterA, ProfileAfterB),
-					DeviceIndex, "hipEventElapsedTime(KernelB)") ||
-				!CheckHip(hipEventElapsedTime(&kernel_c_ms, ProfileAfterB, ProfileAfterC),
-					DeviceIndex, "hipEventElapsedTime(KernelC)"))
-			{
-				gTotalErrors++;
-				break;
-			}
-			KernelAMilliseconds.push_back(kernel_a_ms);
-			KernelBMilliseconds.push_back(kernel_b_ms);
-			KernelCMilliseconds.push_back(kernel_c_ms);
-		}
-
-		if (cnt >= MAX_DP_CNT)
-		{
-			cnt = MAX_DP_CNT;
-			printf("GPU %d, gpu DP buffer overflow, some points lost, increase DP value!\r\n", DeviceIndex);
-		}
-		u64 pnt_cnt = (u64)KangCnt * Kparams.iter_cnt;
-
-		if (cnt)
-		{
-			err = hipMemcpyAsync(DPs_out, Kparams.DPs_out + 4, cnt * GPU_DP_SIZE,
-				hipMemcpyDeviceToHost, Stream);
-			if (!CheckHip(err, DeviceIndex, "hipMemcpyAsync(DPs)") ||
-				!CheckHip(hipStreamSynchronize(Stream), DeviceIndex, "hipStreamSynchronize(DPs)"))
-			{
-				gTotalErrors++;
-				break;
-			}
-			AddPointsToList(DPs_out, cnt, KangCnt, pnt_cnt, JumperInd);
-		}
-
-		//dbg
-		if (!CheckHip(hipMemcpyAsync(dbg, Kparams.dbg_buf, 1024, hipMemcpyDeviceToHost, Stream),
-			DeviceIndex, "hipMemcpyAsync(dbg)"))
-			break;
-
-		u32 lcnt;
-		if (!CheckHip(hipMemcpyAsync(&lcnt, Kparams.LoopedKangs, 4, hipMemcpyDeviceToHost, Stream),
-			DeviceIndex, "hipMemcpyAsync(loop count)") ||
-			!CheckHip(hipStreamSynchronize(Stream), DeviceIndex, "hipStreamSynchronize(debug copies)"))
-			break;
-		//printf("GPU %d, Looped: %d\r\n", DeviceIndex, lcnt);
-
-		DoRestartKangs();
-
-		u64 t2 = GetTickCount64();
-		u64 tm = t2 - t1;
-		if (!tm)
-			tm = 1;
-		int cur_speed = (int)(pnt_cnt / (tm * 1000));
-		if (ProfilingEnabled)
-			EndToEndMKeys.push_back(static_cast<float>(pnt_cnt) / (static_cast<float>(tm) * 1000.0f));
-		//printf("GPU %d kernel time %d ms, speed %d MH\r\n", DeviceIndex, (int)tm, cur_speed);
-
-		SpeedStats[cur_stats_ind] = cur_speed;
-		cur_stats_ind = (cur_stats_ind + 1) % STATS_WND_SIZE;
-
-#ifdef DEBUG_MODE
-		if ((iter % 300) == 0)
-		{
-			int corr_cnt = Dbg_CheckKangs();
-			if (corr_cnt)
-			{
-				printf("DBG: GPU %d, KANGS CORRUPTED: %d\r\n", DeviceIndex, corr_cnt);
-				gTotalErrors++;
-			}
-			else
-				printf("DBG: GPU %d, ALL KANGS OK!\r\n", DeviceIndex);
-		}
-		iter++;
-#endif
-
-
+		gTotalErrors.fetch_add(1, std::memory_order_relaxed);
+		Release();
+		return;
 	}
+
+	OutputRing.Reset();
+	try
+	{
+		ConsumerThread = std::thread(&RCGpuKang::ConsumeOutputRing, this);
+	}
+	catch (const std::system_error& error)
+	{
+		fprintf(stderr, "GPU %d could not start DP consumer: %s\n",
+			DeviceIndex, error.what());
+		gTotalErrors.fetch_add(1, std::memory_order_relaxed);
+		Release();
+		return;
+	}
+	bool succeeded = true;
+	int pending_slot = -1;
+	std::size_t next_slot = 0;
+	while (!StopFlag.load(std::memory_order_relaxed))
+	{
+		if (!LaunchIteration(next_slot))
+		{
+			succeeded = false;
+			break;
+		}
+		if (pending_slot >= 0 && !FinishIteration(static_cast<std::size_t>(pending_slot)))
+		{
+			succeeded = false;
+			break;
+		}
+		pending_slot = static_cast<int>(next_slot);
+		next_slot = (next_slot + 1) % OutputSlots.size();
+	}
+
+	if (succeeded && pending_slot >= 0 &&
+		!FinishIteration(static_cast<std::size_t>(pending_slot)))
+		succeeded = false;
+	StopOutputConsumer(!succeeded);
+	if (!succeeded)
+		gTotalErrors.fetch_add(1, std::memory_order_relaxed);
 
 	if (ProfilingEnabled)
 		PrintProfileSummary();
@@ -875,8 +1039,8 @@ void RCGpuKang::ToRestartKangaroo(int KangInd)
 
 int RCGpuKang::GetStatsSpeed()
 {
-	int res = SpeedStats[0];
+	int res = SpeedStats[0].load(std::memory_order_relaxed);
 	for (int i = 1; i < STATS_WND_SIZE; i++)
-		res += SpeedStats[i];
+		res += SpeedStats[i].load(std::memory_order_relaxed);
 	return res / STATS_WND_SIZE;
 }

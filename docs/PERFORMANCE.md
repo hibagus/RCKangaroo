@@ -153,3 +153,22 @@ but no MI300X runtime performance claim is made.
 See [PHASE6_KERNEL_TUNING.md](PHASE6_KERNEL_TUNING.md) for the full matrices,
 memory tradeoff, correctness gates, A/B fusion decision, reproducible commands,
 and MI300X validation status.
+
+## Phase 7 host and multi-GPU scaling
+
+Pinned double-buffered output rings, independent compute/copy streams, per-GPU
+consumers, a 256-way sharded DP database, and NUMA-local affinity preserve the
+selected MI355X kernel rate while scaling to all eight GPUs:
+
+| GPUs | Aggregate MKeys/s | Scaling efficiency | Process CPU |
+|---:|---:|---:|---:|
+| 1 | 4,455.360 | 100.00% | 34.1% of one core |
+| 2 | 8,948.004 | 100.42% | 38.6% of one core |
+| 4 | 17,905.241 | 100.47% | 45.8% of one core |
+| 8 | 35,698.616 | 100.16% | 59.4% of one core |
+
+An eight-GPU DP16 stress run reached 35,770.662 MKeys/s at 100.25% efficiency
+and 63.1% of one CPU core without an overflow diagnostic. See
+[PHASE7_HOST_MULTI_GPU.md](PHASE7_HOST_MULTI_GPU.md) for the design, exact
+protocol, per-GPU interpretation, outlier disclosure, tests, and reproduction
+command.

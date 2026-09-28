@@ -112,6 +112,8 @@ find_package(Threads REQUIRED)
 
 add_library(rckangaroo_core STATIC
     src/core/ec.cpp
+    src/core/host_pipeline.cpp
+    src/core/host_topology.cpp
     src/core/runtime_options.cpp
     src/core/utils.cpp
 )

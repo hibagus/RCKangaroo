@@ -66,7 +66,7 @@ docs/PHASE6_KERNEL_TUNING.md for the measured matrices and runner commands.
 
 <b>Command line parameters:</b>
 
-<b>-gpu</b>		which GPUs are used, for example, "035" means that GPUs #0, #3 and #5 are used. If not specified, all available GPUs are used. 
+<b>--gpu</b>		comma-separated GPU indices, for example, `--gpu 0,3,5`. Multi-digit indices are supported. The compact legacy form `-gpu 035` remains accepted. If not specified, all available GPUs are used.
 
 <b>-pubkey</b>		public key to solve, both compressed and uncompressed keys are supported. If not specified, software starts in benchmark mode and solves random keys. 
 

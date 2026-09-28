@@ -482,6 +482,32 @@ tuning record still requires physical MI300X hardware.
 - Measure one-, two-, four-, and eight-GPU scaling.
 - Keep the normal hot path device-local; peer/XGMI transfers are not expected to be necessary.
 
+Implementation checkpoint (2026-09-28), with protocol and design details in
+[PHASE7_HOST_MULTI_GPU.md](PHASE7_HOST_MULTI_GPU.md):
+
+- Replaced the synchronous count/payload copies and global staging buffer with
+  two device outputs, two pinned host outputs, an independent transfer stream,
+  and a dedicated consumer per GPU.
+- The GPU worker queues the next compute launch before reclaiming the previous
+  transfer. Ring ownership provides lossless host backpressure; device overflow
+  is reported with an exact dropped count.
+- Sharded database insertion across 256 first-byte locks and made the database
+  count atomic. Allocation failure stops and joins all workers.
+- Added PCI/NUMA-local worker and consumer affinity with process-cpuset
+  fallback, deterministic per-GPU initialization streams, and modern
+  `--gpu 0,3,5` selection while retaining `-gpu 035`.
+- Measured 4,455.360, 8,948.004, 17,905.241, and 35,698.616 MKeys/s on
+  1/2/4/8 MI355X GPUs: 100.00%, 100.42%, 100.47%, and 100.16% efficiency.
+  Eight GPUs used 59.4% of one CPU core in the DP32 protocol.
+- A DP16 stress pair measured 4,459.987 MKeys/s on one GPU and 35,770.662
+  MKeys/s on eight, with no output overflow and 63.1% of one CPU core.
+- Added CPU regression coverage for ring shutdown, backpressure, abort,
+  overflow accounting, topology parsing, GPU lists, and concurrent database
+  shards. The complete MI355X suite passes 10/10.
+
+The MI355X exit criteria are satisfied. The host code cross-builds for gfx942;
+runtime validation still requires physical MI300X hardware.
+
 Exit criteria:
 
 - The host DP pipeline does not reduce pure GPU throughput at the supported DP settings.
@@ -621,6 +647,6 @@ Record major choices here as implementation progresses.
 - [ ] Phase 4: optimized field arithmetic (`gfx950` complete; `gfx942` runtime pending)
 - [ ] Phase 5: wave64 inversion design (`gfx950` complete; `gfx942` runtime pending)
 - [ ] Phase 6: per-architecture kernel tuning (`gfx950` complete; `gfx942` runtime pending)
-- [ ] Phase 7: host and multi-GPU optimization
+- [x] Phase 7: host and multi-GPU optimization
 - [ ] Phase 8: optional handwritten AMD ISA
 - [ ] Phase 9: documentation and continuous validation

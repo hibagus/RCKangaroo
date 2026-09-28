@@ -4,6 +4,7 @@
 #include <iostream>
 #include <limits>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -77,6 +78,25 @@ void TestSuccessfulOptions()
                rckangaroo::RuntimeOptionParseResult::success,
            "parse --kernel-steps");
     Expect(options.kernel_steps == 2048, "store kernel steps");
+
+    char gpu_option[] = "--gpu";
+    char gpu_list[] = "0,3,12";
+    char* gpu_argv[] = {program, gpu_option, gpu_list};
+    Expect(Parse(3, gpu_argv, options, error, next_index) ==
+               rckangaroo::RuntimeOptionParseResult::success,
+           "parse modern GPU list");
+    Expect(options.gpu_selection_specified &&
+               options.gpu_indices == std::vector<int>({0, 3, 12}),
+           "store modern GPU list");
+
+    char legacy_gpu_option[] = "-gpu";
+    char compact_gpu_list[] = "035";
+    char* compact_gpu_argv[] = {program, legacy_gpu_option, compact_gpu_list};
+    Expect(Parse(3, compact_gpu_argv, options, error, next_index) ==
+               rckangaroo::RuntimeOptionParseResult::success,
+           "parse compact legacy GPU list");
+    Expect(options.gpu_indices == std::vector<int>({0, 3, 5}),
+           "store compact legacy GPU list");
 
     char maximum[] = "18446744073709551615";
     char* maximum_argv[] = {program, seed_option, maximum};
@@ -153,6 +173,25 @@ void TestRejectedOptions()
     Expect(Parse(3, overflow_argv, options, error, next_index) ==
                rckangaroo::RuntimeOptionParseResult::error,
            "reject uint64 overflow");
+
+    char gpu_option[] = "--gpu";
+    char duplicate_gpus[] = "0,3,3";
+    char* duplicate_gpu_argv[] = {program, gpu_option, duplicate_gpus};
+    Expect(Parse(3, duplicate_gpu_argv, options, error, next_index) ==
+               rckangaroo::RuntimeOptionParseResult::error,
+           "reject duplicate GPU index");
+
+    char empty_gpu_token[] = "0,,3";
+    char* empty_gpu_argv[] = {program, gpu_option, empty_gpu_token};
+    Expect(Parse(3, empty_gpu_argv, options, error, next_index) ==
+               rckangaroo::RuntimeOptionParseResult::error,
+           "reject empty GPU-list token");
+
+    char out_of_range_gpu[] = "32";
+    char* out_of_range_gpu_argv[] = {program, gpu_option, out_of_range_gpu};
+    Expect(Parse(3, out_of_range_gpu_argv, options, error, next_index) ==
+               rckangaroo::RuntimeOptionParseResult::error,
+           "reject GPU index above implementation limit");
 }
 
 void TestDerivedSeeds()

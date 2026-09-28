@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace rckangaroo {
 
@@ -12,7 +13,9 @@ struct RuntimeOptions {
     std::uint64_t duration_seconds = 0;
     std::uint64_t kernel_steps = 0;
     std::uint64_t point_groups = 0;
+    std::vector<int> gpu_indices;
     bool seed_specified = false;
+    bool gpu_selection_specified = false;
 };
 
 enum class RuntimeOptionParseResult {
@@ -28,6 +31,11 @@ RuntimeOptionParseResult ParseRuntimeOption(
     int& next_index,
     RuntimeOptions& options,
     std::string& error);
+
+bool ParseGpuList(std::string_view text,
+                  bool legacy_compact,
+                  std::vector<int>& gpu_indices,
+                  std::string& error);
 
 std::uint64_t DeriveSeed(std::uint64_t base_seed,
                          std::uint64_t iteration,

@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <atomic>
+#include <mutex>
 #include <string.h>
 #include <stdio.h>
 #include <vector>
@@ -88,8 +90,17 @@ class TFastBase
 private:
 	MemPool mps[256];
 	TListRec lists[256][256][256];
+	std::mutex shard_mutexes[256];
+	std::atomic<u64> block_count{0};
 	int lower_bound(TListRec* list, int mps_ind, u8* data);
 public:
+	enum class InsertResult
+	{
+		inserted,
+		found,
+		allocation_failed,
+	};
+
 	u8 Header[256];
 
 	TFastBase();
@@ -98,6 +109,7 @@ public:
 	u8* AddDataBlock(u8* data, int pos = -1);
 	u8* FindDataBlock(u8* data);
 	u8* FindOrAddDataBlock(u8* data);
+	InsertResult FindOrAddDataBlockConcurrent(u8* data, u8* existing_data);
 	u64 GetBlockCnt();
 	bool LoadFromFile(char* fn);
 	bool SaveToFile(char* fn);

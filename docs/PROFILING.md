@@ -166,3 +166,19 @@ power policy.
 MI300X (`gfx942`) code objects can be extracted on this host, but runtime
 performance and telemetry must be captured on real MI300X hardware before an
 MI300X result is accepted.
+
+## Multi-GPU host-pipeline scaling
+
+For Phase 7 host and scaling measurements, run:
+
+```sh
+python3 scripts/benchmark/run_multi_gpu_scaling.py \
+  --counts 1,2,4,8 --duration 30 --dp 32 \
+  --output phase7-scaling.json
+```
+
+The runner enables `RCK_PROFILE`, collects one JSON profile per GPU, sums the
+per-GPU end-to-end medians, computes efficiency against the one-GPU sample,
+and records child-process CPU time, wall time, and peak RSS. Use `--dp 16` to
+stress the DP transfer and consumer path. Run from an otherwise idle host and
+inspect per-GPU medians before accepting an aggregate result.
