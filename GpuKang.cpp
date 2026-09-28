@@ -25,7 +25,9 @@ extern bool gGenMode; //tames generation mode
 
 int RCGpuKang::CalcKangCnt()
 {
-	Kparams.BlockCnt = mpCnt;
+	// Must match Prepare(), otherwise the DP and K estimates printed at startup
+	// are computed from a different kangaroo count than the run actually uses.
+	Kparams.BlockCnt = mpCnt - sm_inv_cnt;
 	Kparams.BlockSize = BLOCK_SIZE;
 	Kparams.GroupCnt = PNT_GROUP_CNT;
 	return Kparams.BlockSize* Kparams.GroupCnt* Kparams.BlockCnt;
