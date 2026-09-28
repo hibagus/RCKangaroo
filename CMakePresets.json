@@ -1,0 +1,73 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_TESTING": "ON"
+      }
+    },
+    {
+      "name": "cpu",
+      "inherits": "base",
+      "displayName": "CPU tests",
+      "cacheVariables": {
+        "RCK_BUILD_HIP": "OFF"
+      }
+    },
+    {
+      "name": "mi300x",
+      "inherits": "base",
+      "displayName": "ROCm MI300X (gfx942)",
+      "cacheVariables": {
+        "RCK_BUILD_HIP": "ON",
+        "RCK_HIP_ARCHITECTURES": "gfx942"
+      }
+    },
+    {
+      "name": "mi355x",
+      "inherits": "base",
+      "displayName": "ROCm MI355X (gfx950)",
+      "cacheVariables": {
+        "RCK_BUILD_HIP": "ON",
+        "RCK_HIP_ARCHITECTURES": "gfx950"
+      }
+    },
+    {
+      "name": "rocm-fat",
+      "inherits": "base",
+      "displayName": "ROCm gfx942 + gfx950 fat binary",
+      "cacheVariables": {
+        "RCK_BUILD_HIP": "ON",
+        "RCK_HIP_ARCHITECTURES": "gfx942;gfx950"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "cpu", "configurePreset": "cpu" },
+    { "name": "mi300x", "configurePreset": "mi300x" },
+    { "name": "mi355x", "configurePreset": "mi355x" },
+    { "name": "rocm-fat", "configurePreset": "rocm-fat" }
+  ],
+  "testPresets": [
+    {
+      "name": "cpu",
+      "configurePreset": "cpu",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "mi355x",
+      "configurePreset": "mi355x",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}

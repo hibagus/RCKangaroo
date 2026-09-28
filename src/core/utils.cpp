@@ -11,12 +11,12 @@
 
 #else
 
-void _BitScanReverse64(u32* index, u64 msk) 
+void BitScanReverse64(u32* index, u64 msk)
 {
     *index = 63 - __builtin_clzll(msk); 
 }
 
-void _BitScanForward64(u32* index, u64 msk) 
+void BitScanForward64(u32* index, u64 msk)
 {
     *index = __builtin_ffsll(msk) - 1; 
 }

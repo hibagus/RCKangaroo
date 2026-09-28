@@ -207,7 +207,7 @@ EcPoint Ec::MultiplyG(EcInt& k)
 	if (n < 0)
 		return res; //error
 	int index;                     
-	_BitScanReverse64((DWORD*)&index, k.data[n]);
+	BitScanReverse64((DWORD*)&index, k.data[n]);
 	for (int i = 0; i <= 64 * n + index; i++)
 	{
 		u8 v = (k.data[i / 64] >> (i % 64)) & 1;	
@@ -560,7 +560,7 @@ void EcInt::Mul_i64(EcInt& val, i64 multiplier)
 void DIV_62(i64& kbnt, i64 modp, i64 val, i64* matrix)
 {
 	int index, cnt;
-	_BitScanForward64((DWORD*)&index, val | 0x4000000000000000);
+	BitScanForward64((DWORD*)&index, val | 0x4000000000000000);
 	APPLY_DIV_SHIFT();
 	cnt = 62 - index;
 	while (cnt > 0)
@@ -579,7 +579,7 @@ void DIV_62(i64& kbnt, i64 modp, i64 val, i64* matrix)
 		val += (modp * mul);
 		matrix[2] += (matrix[0] * mul);
 		matrix[3] += (matrix[1] * mul);
-		_BitScanForward64((DWORD*)&index, val | (1ull << cnt));
+		BitScanForward64((DWORD*)&index, val | (1ull << cnt));
 		APPLY_DIV_SHIFT();
 		cnt -= index;
 	}

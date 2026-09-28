@@ -41,8 +41,8 @@
  
 	u64 GetTickCount64();
 	static void Sleep(int x) { usleep(x * 1000); }      
-    void _BitScanReverse64(u32* index, u64 msk);
-    void _BitScanForward64(u32* index, u64 msk);       
+    void BitScanReverse64(u32* index, u64 msk);
+    void BitScanForward64(u32* index, u64 msk);
     typedef __uint128_t uint128_t;
     u64 _umul128(u64 m1, u64 m2, u64* hi);
     u64 __shiftright128 (u64 LowPart, u64 HighPart, u8 Shift);

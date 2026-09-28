@@ -7,12 +7,13 @@
 #include <iostream>
 #include <vector>
 
-#include <hip/hip_runtime.h>
+#include "cuda_runtime.h"
+#include "cuda.h"
 
 #include "rckangaroo/types.hpp"
 #include "rckangaroo/config.hpp"
 #include "rckangaroo/utils.hpp"
-#include "rckangaroo/gpu/kangaroo.hpp"
+#include "gpu_kang.hpp"
 #include "rckangaroo/runtime_options.hpp"
 
 
@@ -81,12 +82,7 @@ void InitGpus()
 {
 	GpuCnt = 0;
 	int gcnt = 0;
-	hipError_t status = hipGetDeviceCount(&gcnt);
-	if (status != hipSuccess)
-	{
-		printf("hipGetDeviceCount failed: %s\r\n", hipGetErrorString(status));
-		return;
-	}
+	cudaGetDeviceCount(&gcnt);
 	if (gcnt > MAX_GPU_CNT)
 		gcnt = MAX_GPU_CNT;
 
@@ -94,57 +90,58 @@ void InitGpus()
 	if (!gcnt)
 		return;
 
-	int drv = 0;
-	int rt = 0;
-	if (hipRuntimeGetVersion(&rt) != hipSuccess || hipDriverGetVersion(&drv) != hipSuccess)
-	{
-		printf("Unable to query HIP driver/runtime versions.\r\n");
-		return;
-	}
+	int drv, rt;
+	cudaRuntimeGetVersion(&rt);
+	cudaDriverGetVersion(&drv);
 	char drvver[100];
 	sprintf(drvver, "%d.%d/%d.%d", drv / 1000, (drv % 100) / 10, rt / 1000, (rt % 100) / 10);
 
-	printf("HIP devices: %d, HIP driver/runtime: %s\r\n", gcnt, drvver);
+	printf("CUDA devices: %d, CUDA driver/runtime: %s\r\n", gcnt, drvver);
+	cudaError_t cudaStatus;
 	for (int i = 0; i < gcnt; i++)
 	{
-		status = hipSetDevice(i);
-		if (status != hipSuccess)
+		cudaStatus = cudaSetDevice(i);
+		if (cudaStatus != cudaSuccess)
 		{
-			printf("hipSetDevice for GPU %d failed: %s\r\n", i, hipGetErrorString(status));
+			printf("cudaSetDevice for gpu %d failed!\r\n", i);
 			continue;
 		}
 
 		if (!gGPUs_Mask[i])
 			continue;
 
-		hipDeviceProp_t deviceProp{};
-		status = hipGetDeviceProperties(&deviceProp, i);
-		if (status != hipSuccess)
-		{
-			printf("hipGetDeviceProperties for GPU %d failed: %s\r\n", i, hipGetErrorString(status));
-			continue;
-		}
-		printf("GPU %d: %s (%s), %.2f GB, %d CUs, PCI %d, L2 size: %d KB\r\n",
-			i,
-			deviceProp.name,
-			deviceProp.gcnArchName,
-			static_cast<double>(deviceProp.totalGlobalMem) / (1024.0 * 1024.0 * 1024.0),
-			deviceProp.multiProcessorCount,
-			deviceProp.pciBusID,
-			deviceProp.l2CacheSize / 1024);
+		cudaDeviceProp deviceProp;
+		cudaGetDeviceProperties(&deviceProp, i);
+		printf("GPU %d: %s, %.2f GB, %d CUs, cap %d.%d, PCI %d, L2 size: %d KB\r\n", i, deviceProp.name, ((float)(deviceProp.totalGlobalMem / (1024 * 1024))) / 1024.0f, deviceProp.multiProcessorCount, deviceProp.major, deviceProp.minor, deviceProp.pciBusID, deviceProp.l2CacheSize / 1024);
+		int cm = deviceProp.major * 10 + deviceProp.minor;
 
-		status = hipSetDeviceFlags(hipDeviceScheduleBlockingSync);
-		if (status != hipSuccess && status != hipErrorSetOnActiveProcess)
+		if (deviceProp.major < 6)
 		{
-			printf("hipSetDeviceFlags for GPU %d failed: %s\r\n", i, hipGetErrorString(status));
+			printf("GPU %d - not supported, skip\r\n", i);
 			continue;
 		}
+
+		cudaSetDeviceFlags(cudaDeviceScheduleBlockingSync);
 
 		GpuKangs[GpuCnt] = new RCGpuKang();
-		GpuKangs[GpuCnt]->DeviceIndex = i;
+		GpuKangs[GpuCnt]->CudaIndex = i;
+		GpuKangs[GpuCnt]->persistingL2CacheMaxSize = deviceProp.persistingL2CacheMaxSize;
 		GpuKangs[GpuCnt]->mpCnt = deviceProp.multiProcessorCount;
 		GpuKangs[GpuCnt]->JumperInd = GpuCnt;
-		printf("GPU %d: portable HIP kernel path enabled.\r\n", i);
+
+		if ((cm != 89) && (cm != 120))
+		{
+			GpuKangs[GpuCnt]->sm_inv_cnt = 0;
+			printf("GPU %d: use 3.x version of RCKangaroo to get better performance!\r\n", i);
+		}
+		else
+		{
+			GpuKangs[GpuCnt]->Is5xxx = (deviceProp.major == 12);
+			GpuKangs[GpuCnt]->sm_inv_cnt = GpuKangs[GpuCnt]->Is5xxx ? (GpuKangs[GpuCnt]->mpCnt / 24) : (GpuKangs[GpuCnt]->mpCnt / 32);
+			if (!GpuKangs[GpuCnt]->sm_inv_cnt)
+				GpuKangs[GpuCnt]->sm_inv_cnt = 1;
+			printf("GPU %d: turbo kernel is enabled!\r\n", i);
+		}
 		GpuCnt++;
 	}
 	printf("Total GPUs for work: %d\r\n", GpuCnt);
@@ -452,7 +449,7 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 		if (!GpuKangs[i]->Prepare(PntToSolve, Range, DP, EcJumps1, EcJumps2, EcJumps3))
 		{
 			GpuKangs[i]->Failed = true;
-			printf("GPU %d Prepare failed\r\n", GpuKangs[i]->DeviceIndex);
+			printf("GPU %d Prepare failed\r\n", GpuKangs[i]->CudaIndex);
 		}
 
 	u64 tm0 = GetTickCount64();
@@ -857,4 +854,3 @@ label_end:
 	free(pPntList2);
 	free(pPntList);
 }
-

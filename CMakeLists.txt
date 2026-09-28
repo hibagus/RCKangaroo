@@ -20,6 +20,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(RCK_BUILD_CUDA "Build the legacy CUDA reference executable" OFF)
+option(RCK_BUILD_HIP "Build the native HIP executable" OFF)
+set(RCK_HIP_ARCHITECTURES "gfx942;gfx950" CACHE STRING
+    "AMD GPU targets for the HIP backend")
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(CompilerWarnings)
@@ -61,7 +64,7 @@ if(RCK_BUILD_CUDA)
     set(CMAKE_CUDA_EXTENSIONS OFF)
 
     add_executable(rckangaroo_cuda
-        apps/rckangaroo.cpp
+        legacy/cuda/rckangaroo.cpp
         legacy/cuda/call_cubin.cpp
         legacy/cuda/gpu_kang.cpp
         legacy/cuda/kernels.cu
@@ -102,6 +105,39 @@ if(RCK_BUILD_CUDA)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${CMAKE_CURRENT_SOURCE_DIR}/legacy/cuda/cubin/kernel_sm120.cubin"
             "$<TARGET_FILE_DIR:rckangaroo_cuda>/kernel_sm120.cubin"
+    )
+endif()
+
+if(RCK_BUILD_HIP)
+    enable_language(HIP)
+
+    set(CMAKE_HIP_STANDARD 20)
+    set(CMAKE_HIP_STANDARD_REQUIRED ON)
+    set(CMAKE_HIP_EXTENSIONS OFF)
+
+    add_library(rckangaroo_hip_backend STATIC
+        src/hip/device.cpp
+        src/hip/kernels.hip
+    )
+    add_library(RCKangaroo::hip_backend ALIAS rckangaroo_hip_backend)
+
+    set_source_files_properties(src/hip/device.cpp PROPERTIES LANGUAGE HIP)
+    target_include_directories(rckangaroo_hip_backend PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/hip"
+    )
+    target_link_libraries(rckangaroo_hip_backend PUBLIC RCKangaroo::core)
+    set_target_properties(rckangaroo_hip_backend PROPERTIES
+        HIP_ARCHITECTURES "${RCK_HIP_ARCHITECTURES}"
+        POSITION_INDEPENDENT_CODE ON
+    )
+
+    add_executable(rckangaroo_hip apps/rckangaroo.cpp)
+    set_source_files_properties(apps/rckangaroo.cpp PROPERTIES LANGUAGE HIP)
+    target_link_libraries(rckangaroo_hip PRIVATE RCKangaroo::hip_backend)
+    set_target_properties(rckangaroo_hip PROPERTIES
+        HIP_ARCHITECTURES "${RCK_HIP_ARCHITECTURES}"
+        OUTPUT_NAME rckangaroo
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
     )
 endif()
 
