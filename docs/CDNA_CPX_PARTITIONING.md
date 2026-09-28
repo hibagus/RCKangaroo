@@ -53,24 +53,50 @@ distinguished point - roughly one jump in 2^30 at dp=30.
 Given +3-5% for a privileged node-wide reconfiguration, this is worth taking if the node is
 dedicated to this workload and not otherwise.
 
-## One partition did not enumerate
+## Why only 63 partitions enumerate: DRM card-minor exhaustion
 
 Seven of the eight physical GPUs expose all 8 XCDs. The GPU on PCI bus `0xDD` exposes only
-7 - PCI function 7 is absent - giving 63 rather than 64:
+7 - function 7 is absent - giving 63 rather than 64.
+
+**This is not a GPU fault.** It is the known Linux issue where the BMC virtual video
+controller consumes a DRM card minor, leaving one too few for a full CPX node. On this
+machine the BMC graphics is a Matrox G200eW3 driven by `mgag200` rather than the ASPEED AST
+that AMD's documentation cites, but the mechanism is identical.
+
+The evidence:
 
 ```
-  bus 0x1B: 8 partitions, functions [0..7]
-  bus 0x3D: 8 partitions, functions [0..7]
-  bus 0x4E: 8 partitions, functions [0..7]
-  bus 0x5F: 8 partitions, functions [0..7]
-  bus 0x9D: 8 partitions, functions [0..7]
-  bus 0xBD: 8 partitions, functions [0..7]
-  bus 0xCD: 8 partitions, functions [0..7]
-  bus 0xDD: 7 partitions, functions [0..6]   MISSING fn 7
+card nodes:    64      (card0 .. card63 - the DRM legacy minor range is 0-63, saturated)
+card0:         mgag200 (Matrox G200eW3 BMC video controller, PCI 03:00.0)
+render nodes:  63      (renderD128 .. renderD190)
+ROCm agents:   63
 ```
 
-The hardware is not at fault: that same GPU reported all 304 CUs - all 8 XCDs - in SPX
-mode. So the partition exists and simply failed to come up under CPX. `dmesg` was not
-readable without privileges, so this was not diagnosed further. Worth checking with
-`dmesg | grep -i amdgpu` and possibly re-applying the partition mode or resetting that
-device, since it is ~1.6% of the node's compute sitting idle.
+DRM allocates card minors 0-63, i.e. exactly 64 slots. `mgag200` claims `card0` at boot, so
+amdgpu's 64 CPX partitions can only be given `card1`-`card63`. The 64th has nowhere to go.
+
+Two details confirm this rather than a hardware problem:
+
+- The missing partition is bus `0xDD` function 7 - the **last** device in PCI enumeration
+  order, which is what running out of minors predicts. A defective XCD would not
+  preferentially be the last one enumerated.
+- That same GPU reported all 304 CUs, all 8 XCDs, in SPX mode.
+
+### Fix
+
+Stop the BMC video driver from claiming a DRM minor, e.g. blacklist it:
+
+```sh
+echo 'blacklist mgag200' | sudo tee /etc/modprobe.d/blacklist-mgag200.conf
+sudo update-initramfs -u    # or dracut -f, depending on distro
+sudo reboot
+```
+
+or add `modprobe.blacklist=mgag200` to the kernel command line.
+
+This costs the local VGA console. Out-of-band management is unaffected - IPMI and remote KVM
+are implemented in BMC firmware and do not depend on the host driver - so on a headless
+node this is usually acceptable.
+
+Recovering the partition is worth about 1.6% of the node's compute, which on the CPX figures
+above would take 83,468 to roughly 84,800 MKeys/s.
