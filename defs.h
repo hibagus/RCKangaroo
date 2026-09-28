@@ -19,7 +19,14 @@ typedef char i8;
 
 
 
+// CPX compute partitioning on MI300X presents each of the 8 XCDs as a separate
+// logical device, so a node of 8 physical GPUs enumerates as 64. The CUDA build
+// keeps 32.
+#ifdef __HIP_PLATFORM_AMD__
+#define MAX_GPU_CNT			64
+#else
 #define MAX_GPU_CNT			32
+#endif
 
 //must be divisible by MD_LEN
 #define STEP_CNT			1000
