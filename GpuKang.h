@@ -82,6 +82,10 @@ public:
 	bool Failed;
 
 	bool Is5xxx;
+	// gfx950. CDNA4's 160 KB of LDS per CU lets KernelA keep the whole jmp1
+	// table resident instead of just its x half; see JMP1_LDS_STRIDE in
+	// src/hip/RCGpuCore.hip, which this must agree with.
+	bool IsCDNA4;
 	int sm_inv_cnt; //number of SMs used for inverse calculation
 
 	int CalcKangCnt();
