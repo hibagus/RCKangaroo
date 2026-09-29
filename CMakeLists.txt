@@ -39,6 +39,7 @@ find_package(Threads REQUIRED)
 set(PROJECT_SOURCES
     RCKangaroo.cpp
     GpuKang.cpp
+    Checkpoint.cpp
     Ec.cpp
     utils.cpp
     CallCubin.cpp

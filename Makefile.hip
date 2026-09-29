@@ -48,7 +48,7 @@ LDFLAGS := -L$(ROCM_PATH)/lib -lamdhip64 -pthread
 
 # CallCubin.cpp is excluded: it is the CUDA driver API path for the prebuilt
 # NVIDIA SASS kernels and has no AMD counterpart.
-CXX_SRCS := RCKangaroo.cpp GpuKang.cpp Ec.cpp utils.cpp
+CXX_SRCS := RCKangaroo.cpp GpuKang.cpp Checkpoint.cpp Ec.cpp utils.cpp
 HIP_SRCS := src/hip/RCGpuCore.hip
 
 CXX_OBJS := $(addprefix $(BUILD_DIR)/,$(CXX_SRCS:.cpp=.o))
