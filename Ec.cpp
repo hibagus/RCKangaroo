@@ -7,6 +7,7 @@
 #include "defs.h"
 #include "Ec.h"
 #include <random>
+#include <atomic>
 #include "utils.h"
 
 // https://en.bitcoin.it/wiki/Secp256k1
@@ -693,12 +694,37 @@ void EcInt::SqrtModP()
 	*this = res;
 }
 
-std::mt19937_64 rng;
-CriticalSection cs_rnd;
+// One generator per thread rather than one behind a lock.
+//
+// RndBits took a global mutex per 64 bits drawn, and GenerateRndDistances draws
+// one distance per kangaroo - 6.3 million per GPU at the CDNA defaults. On an
+// 8-GPU node that is ~50 million contended acquisitions, and the eight worker
+// threads spent over four minutes serialised on it before the first jump ran.
+//
+// Each thread takes its own stream, seeded from the global seed mixed with a
+// claim counter: default-constructing per thread would instead give every GPU
+// the identical set of kangaroo distances.
+static u64 gRndSeed = 0;
+static std::atomic<u64> gRndStream(0);
+
+static std::mt19937_64& ThreadRng()
+{
+	static thread_local std::mt19937_64 rng([]() {
+		// SplitMix64 finalizer, so neighbouring stream indices do not produce
+		// correlated mt19937_64 initial states.
+		u64 z = gRndSeed + 0x9E3779B97F4A7C15ull * (gRndStream.fetch_add(1) + 1);
+		z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+		z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+		return z ^ (z >> 31);
+	}());
+	return rng;
+}
 
 void SetRndSeed(u64 seed)
 {
-	rng.seed(seed);
+	// Called once from the main thread before any worker starts, so no thread
+	// has latched a stream yet.
+	gRndSeed = seed;
 }
 
 void EcInt::RndBits(int nbits)
@@ -706,10 +732,9 @@ void EcInt::RndBits(int nbits)
 	SetZero();
 	if (nbits > 256)
 		nbits = 256;
-	cs_rnd.Enter();
+	std::mt19937_64& rng = ThreadRng();
 	for (int i = 0; i < (nbits + 63) / 64; i++)
 		data[i] = rng();
-	cs_rnd.Leave();
 	data[nbits / 64] &= (1ull << (nbits % 64)) - 1;
 }
 
