@@ -140,13 +140,17 @@ void InitGpus()
 		// misclassifies it. There is no asm kernel path on AMD, so sm_inv_cnt
 		// stays 0 and every CU jumps points.
 		GpuKangs[GpuCnt]->Is5xxx = false;
+		GpuKangs[GpuCnt]->IsCDNA4 = false;
 		GpuKangs[GpuCnt]->sm_inv_cnt = 0;
 		{
 			const char* arch = deviceProp.gcnArchName;
 			if (strstr(arch, "gfx942"))
 				printf("GPU %d: CDNA3 (MI300-series) detected\r\n", i);
 			else if (strstr(arch, "gfx950"))
+			{
+				GpuKangs[GpuCnt]->IsCDNA4 = true;
 				printf("GPU %d: CDNA4 (MI350-series) detected\r\n", i);
+			}
 			else
 				printf("GPU %d: %s is untested for this port; expect reduced performance\r\n", i, arch);
 		}

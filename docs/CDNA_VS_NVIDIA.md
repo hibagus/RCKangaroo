@@ -155,12 +155,12 @@ require reducing bytes moved per point-addition, not instructions.
 
 ## Honest scorecard
 
-| | RTX 4090 | RTX 5090 | MI300X (this port) | 8x MI300X |
-|---|---|---|---|---|
-| Throughput | 14.5 GH/s | 19.3 GH/s | 10.1 GH/s | **81.0 GH/s** |
-| Relative to 4090 | 1.0x | 1.33x | 0.70x | **5.6x** |
-| Board power (approx) | 450 W | 575 W | 750 W | 6000 W |
-| Efficiency | ~32 MH/s/W | ~34 MH/s/W | ~13 MH/s/W | ~13 MH/s/W |
+| | RTX 4090 | RTX 5090 | MI300X (this port) | MI355X (this port) | 8x MI355X |
+|---|---|---|---|---|---|
+| Throughput | 14.5 GH/s | 19.3 GH/s | 10.1 GH/s | 15.9 GH/s | **126.2 GH/s** |
+| Relative to 4090 | 1.0x | 1.33x | 0.70x | 1.10x | **8.7x** |
+| Board power (approx) | 450 W | 575 W | 750 W | 1300 W (measured) | 10,400 W |
+| Efficiency | ~32 MH/s/W | ~34 MH/s/W | ~13 MH/s/W | ~12 MH/s/W | ~12 MH/s/W |
 
 **Per watt, the consumer NVIDIA parts win this workload outright**, by roughly 2.5x. That
 is a direct consequence of the carry-in feature plus the clock advantage, and no amount of
@@ -180,6 +180,10 @@ capital already spent on the hardware.
 - Anyone porting big-integer arithmetic to CDNA should expect the missing carry-in to cost
   roughly 1.5x on multiply-heavy kernels, and should not expect cache-residency tuning to
   recover it.
-- CDNA4 (gfx950) is built and arch-tuned here but has never been run - there is no MI355X
-  on this machine. Its 160 KB LDS per CU (against 64 KB) should allow better occupancy, but
-  that is untested.
+- CDNA4 (gfx950) has since been measured on 8x MI355X: **15.9 GH/s per GPU, 126.2 GH/s for
+  the node**, which is 1.10x a single RTX 4090 per GPU rather than 0.70x. See
+  `CDNA4_MI355X.md`. The instruction-set analysis above is unchanged - gfx950 still has no
+  multiply-add with carry-in - and per-instruction rates are within a few percent of CDNA3.
+  The gain is HBM3E bandwidth and sustained clock. The 160 KB LDS did not buy occupancy
+  (147 VGPRs cap KernelA at 3 waves/SIMD either way) but it did let the whole jmp1 table
+  stay resident, which is worth 2%.

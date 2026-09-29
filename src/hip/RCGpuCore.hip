@@ -88,24 +88,54 @@ static_assert(PNT_GROUP_CNT <= 32, "PNT_GROUP_CNT must fit in L1S2's u32 bitmask
 
 extern __shared__ u64 LDS[];
 
+// How much of the jmp1 table lives in LDS.
+//
+// CDNA3 has 64 KB of LDS per CU. At 3 workgroups/CU that is 21 KB each, so only
+// the x-coordinates fit (16 KB) and y is re-read from global on every point
+// addition. CDNA4 raises LDS to 160 KB per CU, which makes 3 x 32 KB affordable,
+// so y moves into LDS as well: 32 bytes of global traffic per point addition
+// removed - about 13% of the kernel's bytes - at no occupancy cost, since 147
+// VGPRs cap the kernel at 3 waves/SIMD long before 96 KB of 160 KB does.
+//
+// The strides live in defs.h so GpuKang.cpp can size the dynamic LDS request
+// from the same constant.
+#ifdef __gfx950__
+#define JMP1_LDS_Y       1
+#define JMP1_LDS_STRIDE  JMP1_LDS_STRIDE_CDNA4      // x[4] then y[4]
+#else
+#define JMP1_LDS_Y       0
+#define JMP1_LDS_STRIDE  JMP1_LDS_STRIDE_CDNA3      // x[4] only
+#endif
+
 // Jump-table reads. The two tables are read in separate branches so each keeps a
 // concretely-typed pointer: the LDS path stays ds_read_b128 while only the rare
 // jmp2 escape path pays a global load. Writing it as a ternary select over a
 // single pointer instead makes the compiler fall back to generic flat_load for
-// both. See note 5. Strides differ - 8 in LDS (x,y packed), 12 in global (x,y
-// then a 4-limb distance only KernelB reads).
+// both. See note 5. The global tables use stride 12 - x, y, then a 4-limb
+// distance only KernelB reads.
 #define LOAD_JMP_X(dst_x, ind, use2) { \
     if (use2) { Copy_int4_x2(dst_x, jmp2_table + 12 * (ind)); } \
-    else      { Copy_int4_x2(dst_x, jmp1x_table + 4 * (ind)); } }
+    else      { Copy_int4_x2(dst_x, jmp1_lds + JMP1_LDS_STRIDE * (ind)); } }
 
+#if JMP1_LDS_Y
 #define LOAD_JMP_XY(dst_x, dst_y, ind, use2) { \
     if (use2) { \
         Copy_int4_x2(dst_x, jmp2_table + 12 * (ind)); \
         Copy_int4_x2(dst_y, jmp2_table + 12 * (ind) + 4); \
     } else { \
-        Copy_int4_x2(dst_x, jmp1x_table + 4 * (ind)); \
+        Copy_int4_x2(dst_x, jmp1_lds + JMP1_LDS_STRIDE * (ind)); \
+        Copy_int4_x2(dst_y, jmp1_lds + JMP1_LDS_STRIDE * (ind) + 4); \
+    } }
+#else
+#define LOAD_JMP_XY(dst_x, dst_y, ind, use2) { \
+    if (use2) { \
+        Copy_int4_x2(dst_x, jmp2_table + 12 * (ind)); \
+        Copy_int4_x2(dst_y, jmp2_table + 12 * (ind) + 4); \
+    } else { \
+        Copy_int4_x2(dst_x, jmp1_lds + 4 * (ind)); \
         Copy_int4_x2(dst_y, jmp1_glb + 12 * (ind) + 4); \
     } }
+#endif
 
 // One 256-thread workgroup per CU, 1 wave per SIMD. See note 2 above: this is
 // required for the VGPR budget, not just a throughput preference.
@@ -145,23 +175,31 @@ __global__ void KernelA(const TKparams Kparams)
     u64* x_last0 = Kparams.LastPnts + 4 * (THREAD_X + BLOCK_SIZE * BLOCK_X);
     u64* y_last0 = x_last0 + PartStride / 8;
 
-    // LDS holds only the jmp1 x-coordinates - 16 KB rather than 32. x is read
-    // twice per group (once building the inverse product, once applying the
-    // jump) while y is read once, so y stays in global. Halving the LDS
-    // footprint is what raises occupancy from 2 to 3 waves/SIMD; see note 5.
+    // On CDNA3, LDS holds only the jmp1 x-coordinates - 16 KB rather than 32.
+    // x is read twice per group (once building the inverse product, once
+    // applying the jump) while y is read once, so y stays in global. Halving
+    // the LDS footprint is what raises occupancy from 2 to 3 waves/SIMD; see
+    // note 5. On CDNA4 there is LDS to spare and y comes along - see
+    // JMP1_LDS_STRIDE above.
     //
     // Source stride is 12 because each entry carries y and then a 4-limb
     // distance after x; only KernelB needs the distances. ds_write_b128 needs
-    // 16-byte alignment, which both strides satisfy.
-    u64* jmp1x_table = LDS;                     // 16 KB: JMP_CNT x x[4]
-    const u64* jmp1_glb = Kparams.Jumps1;       // global, stride 12
+    // 16-byte alignment, which every stride here satisfies.
+    u64* jmp1_lds = LDS;                        // JMP_CNT x JMP1_LDS_STRIDE u64
     const u64* jmp2_table = Kparams.Jumps2;     // global, stride 12
+#if !JMP1_LDS_Y
+    const u64* jmp1_glb = Kparams.Jumps1;       // global, stride 12
+#endif
 
     int i = THREAD_X;
     while (i < JMP_CNT)
     {
-        *(int4*)&jmp1x_table[4 * i + 0] = *(int4*)&Kparams.Jumps1[12 * i + 0];
-        *(int4*)&jmp1x_table[4 * i + 2] = *(int4*)&Kparams.Jumps1[12 * i + 2];
+        *(int4*)&jmp1_lds[JMP1_LDS_STRIDE * i + 0] = *(int4*)&Kparams.Jumps1[12 * i + 0];
+        *(int4*)&jmp1_lds[JMP1_LDS_STRIDE * i + 2] = *(int4*)&Kparams.Jumps1[12 * i + 2];
+#if JMP1_LDS_Y
+        *(int4*)&jmp1_lds[JMP1_LDS_STRIDE * i + 4] = *(int4*)&Kparams.Jumps1[12 * i + 4];
+        *(int4*)&jmp1_lds[JMP1_LDS_STRIDE * i + 6] = *(int4*)&Kparams.Jumps1[12 * i + 6];
+#endif
         i += BLOCK_SIZE;
     }
 

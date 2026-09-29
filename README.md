@@ -116,7 +116,7 @@ wrong assumptions cancelled out at one block per CU.
 ### Prerequisites
 
 * ROCm 10 or later. The build auto-detects `/opt/rocm/core-10`, falling back to `/opt/rocm`.
-* An AMD Instinct GPU — gfx942 (MI300X) is tested; gfx950 (MI355X) builds but is unverified.
+* An AMD Instinct GPU — gfx942 (MI300X) and gfx950 (MI355X) are both tested.
 * `g++` for the host sources. They stay on GCC because `utils.cpp` uses dialect-alternative
   inline asm that clang's integrated assembler rejects, and `Ec.cpp` uses x86 intrinsics.
 * Python 3 for the assembly generator and the differential test's ground truth.
@@ -180,15 +180,24 @@ make -f Makefile.hip bench   # instruction-rate microbenchmark
 <!-- PERFORMANCE -->
 ## Performance
 
-Measured on 8× MI300X, ROCm 10, puzzle #140 (139-bit range, K = 1.15, 0% DP overhead).
+Puzzle #140 (139-bit range, K = 1.15, 0% DP overhead). MI300X on ROCm 10, MI355X on
+ROCm 7.2.
 
 | Configuration | Throughput |
 | --- | --- |
-| 8× MI300X, CPX partitioning | **85,452 MKeys/s** |
+| 8× MI355X, SPX partitioning | **126,180 MKeys/s** |
+| 8× MI300X, CPX partitioning | 85,452 MKeys/s |
 | 8× MI300X, SPX partitioning | 81,000 MKeys/s |
-| Per physical GPU | 10.7 GH/s |
+| Per physical MI355X | 15.9 GH/s |
+| Per physical MI300X | 10.7 GH/s |
 | RTX 4090 (RC's figure) | 14.5 GH/s |
 | RTX 5090 (RC's figure) | 19.3 GH/s |
+
+MI355X is 57% faster per GPU than MI300X even though its nominal vector-integer peak is 4%
+*lower* — the gain is HBM3E bandwidth and sustained clock, not ALUs, and CDNA4 adds no new
+integer instructions. It is also power-limited rather than thermally limited, which makes
+bytes-per-point-addition worth more than instructions-per-point-addition. See
+[docs/CDNA4_MI355X.md](docs/CDNA4_MI355X.md).
 
 The node is about 5.9× a single RTX 4090. **Per watt the consumer NVIDIA parts win this
 workload outright**, by roughly 2.5×, and the reason is a single instruction-set feature
@@ -258,9 +267,10 @@ For context, the arithmetic already runs at **87% of VALU peak** measured in iso
 - [x] Phase 2 — assembly for the arithmetic primitives
 - [x] Phase 3 — architecture and occupancy tuning, CPX partitioning
 - [x] ~~Phase 4 — hand-written kernel assembly~~ *cancelled; measured at ~4% for a ~2,500-line rewrite*
-- [ ] Verify on CDNA4 (gfx950) hardware — builds but has never been run
+- [x] Verify on CDNA4 (gfx950) hardware — [measured on 8× MI355X](docs/CDNA4_MI355X.md)
+- [x] Move `jmp_y` back into LDS — free on CDNA4's 160 KB, +2.0%; still costs a wave on CDNA3
+- [ ] Measure CPX partitioning on MI355X; it was worth +5.5% on MI300X
 - [ ] Rework `-gpu` to address more than 10 devices, which CPX exposes
-- [ ] Move `jmp_y` back into LDS, trading 32 of 220 bytes per point-addition against a wave of occupancy
 - [ ] Host-side usability: dynamic DP validation, per-GPU statistics, progress display
 
 See the [open issues](https://github.com/hibagus/RCKangaroo/issues) for a full list.

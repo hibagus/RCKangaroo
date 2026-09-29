@@ -6,6 +6,7 @@
 #   make -f Makefile.hip test                 # arithmetic differential test
 #   make -f Makefile.hip isa                  # static codegen check
 #   make -f Makefile.hip bench                # ISA instruction-rate benchmark
+#   make -f Makefile.hip mfma                 # matrix cores vs VALU for 256-bit mul
 #
 # The CUDA build (CMakeLists.txt) is untouched and still works.
 
@@ -56,7 +57,7 @@ HIP_OBJS := $(addprefix $(BUILD_DIR)/,$(HIP_SRCS:.hip=.o))
 OBJS     := $(CXX_OBJS) $(HIP_OBJS)
 DEPS     := $(OBJS:.o=.d)
 
-.PHONY: all clean test isa bench info
+.PHONY: all clean test isa bench mfma info
 all: $(TARGET)
 
 $(TARGET): $(OBJS)
@@ -86,6 +87,15 @@ bench: $(BUILD_DIR)/isa_rate
 	@$(BUILD_DIR)/isa_rate 0
 
 $(BUILD_DIR)/isa_rate: bench/isa_rate.hip
+	@mkdir -p $(dir $@)
+	$(HIPCC) -O3 $(ARCH_FLAGS) -o $@ $<
+
+# Matrix cores against the VALU for 256-bit multiplication. See
+# docs/CDNA4_MI355X.md; the short answer is that they lose on this algorithm.
+mfma: $(BUILD_DIR)/mfma_rate
+	@$(BUILD_DIR)/mfma_rate 0
+
+$(BUILD_DIR)/mfma_rate: bench/mfma_rate.hip
 	@mkdir -p $(dir $@)
 	$(HIPCC) -O3 $(ARCH_FLAGS) -o $@ $<
 

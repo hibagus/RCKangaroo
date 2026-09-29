@@ -49,6 +49,21 @@ typedef char i8;
 #define PNT_GROUP_CNT		24
 #endif
 
+#ifdef __HIP_PLATFORM_AMD__
+// How many u64 each entry of KernelA's LDS copy of the jmp1 table occupies.
+// CDNA3's 64 KB per CU only affords the x-coordinates at 3 workgroups/CU;
+// CDNA4's 160 KB affords x and y both, which removes a global read per point
+// addition. Shared with the host so it can size the dynamic LDS request.
+//
+// Must be even - every access is a 16-byte-aligned ds_read_b128 - and it also
+// picks which LDS bank an entry starts in, so it doubles as a bank-conflict
+// knob. Override at build time to sweep it.
+#define JMP1_LDS_STRIDE_CDNA3	4
+#ifndef JMP1_LDS_STRIDE_CDNA4
+#define JMP1_LDS_STRIDE_CDNA4	8
+#endif
+#endif
+
 // kang type
 #define TAME				0  // Tame kangs
 #define WILD				1  // Wild kangs 
