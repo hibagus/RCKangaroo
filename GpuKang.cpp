@@ -13,6 +13,7 @@
 #endif
 
 #include "GpuKang.h"
+#include "Checkpoint.h"
 
 cudaError_t cuSetGpuParams(TKparams Kparams, u64* _jmp2_table);
 void CallGpuKernelGen(TKparams Kparams);
@@ -469,6 +470,114 @@ void RCGpuKang::Stop()
 	StopFlag = true;
 }
 
+void RCGpuKang::SetResumeSource(const char* fn, u64 offset)
+{
+	strncpy(CkptFileName, fn, sizeof(CkptFileName) - 1);
+	CkptFileName[sizeof(CkptFileName) - 1] = 0;
+	CkptKangOffset = offset;
+	CkptResume = true;
+}
+
+void RCGpuKang::RequestPause()
+{
+	PauseFlag = true;
+}
+
+void RCGpuKang::ReleasePause()
+{
+	PauseFlag = false;
+}
+
+//true once the worker is parked at a batch boundary, or is not running at all
+bool RCGpuKang::IsQuiesced()
+{
+	return QuiescedFlag;
+}
+
+bool RCGpuKang::IsStateReadable()
+{
+	return DevMemValid;
+}
+
+//Reads this GPU's kangaroo block out of an open checkpoint. Runs in the worker
+//thread during Start(), so each GPU pays for its own slice and we never hold
+//every GPU's kangaroos in host memory at once.
+bool RCGpuKang::RestoreKangsFromCkpt()
+{
+	u64 xy_size = (u64)KangCnt * 64;	//x then y, as KernelA indexes them
+	u64 d_size = (u64)KangCnt * 32;		//accumulated distances
+
+	FILE* fp = fopen(CkptFileName, "rb");
+	if (!fp)
+	{
+		printf("GPU %d, cannot open checkpoint %s\r\n", CudaIndex, CkptFileName);
+		return false;
+	}
+	u8* buf = (u8*)malloc(xy_size);
+	if (!buf)
+	{
+		fclose(fp);
+		return false;
+	}
+
+	bool ok = false;
+	if (CKPT_FSEEK64(fp, (i64)CkptKangOffset, SEEK_SET) != 0)
+		printf("GPU %d, cannot seek to the checkpoint kangaroo block\r\n", CudaIndex);
+	else if (fread(buf, 1, xy_size, fp) != xy_size)
+		printf("GPU %d, checkpoint is truncated in the kangaroo points\r\n", CudaIndex);
+	else if (cudaMemcpy(Kparams.L2, buf, xy_size, cudaMemcpyHostToDevice) != cudaSuccess)
+		printf("GPU %d, uploading kangaroo points failed\r\n", CudaIndex);
+	else if (fread(buf, 1, d_size, fp) != d_size)
+		printf("GPU %d, checkpoint is truncated in the kangaroo distances\r\n", CudaIndex);
+	else if (cudaMemcpy(Kparams.dists, buf, d_size, cudaMemcpyHostToDevice) != cudaSuccess)
+		printf("GPU %d, uploading kangaroo distances failed\r\n", CudaIndex);
+	else
+		ok = true;
+
+	free(buf);
+	fclose(fp);
+	if (ok)
+		printf("GPU %d, %d kangaroos restored from checkpoint\r\n", CudaIndex, KangCnt);
+	return ok;
+}
+
+//Writes this GPU's kangaroo block. Only valid while the worker is parked; the
+//lock is what stops it from freeing the allocations underneath us if it is
+//exiting at the same moment.
+bool RCGpuKang::SaveKangsToStream(FILE* fp)
+{
+	u64 xy_size = (u64)KangCnt * 64;
+	u64 d_size = (u64)KangCnt * 32;
+
+	ckpt_cr.Enter();
+	if (!DevMemValid)
+	{
+		ckpt_cr.Leave();
+		return false;
+	}
+
+	bool ok = false;
+	u8* buf = (u8*)malloc(xy_size);
+	if (buf)
+	{
+		if (cudaSetDevice(CudaIndex) != cudaSuccess)
+			printf("GPU %d, cudaSetDevice failed while checkpointing\r\n", CudaIndex);
+		else if (cudaMemcpy(buf, Kparams.L2, xy_size, cudaMemcpyDeviceToHost) != cudaSuccess)
+			printf("GPU %d, reading kangaroo points failed\r\n", CudaIndex);
+		else if (fwrite(buf, 1, xy_size, fp) != xy_size)
+			printf("GPU %d, writing kangaroo points failed\r\n", CudaIndex);
+		else if (cudaMemcpy(buf, Kparams.dists, d_size, cudaMemcpyDeviceToHost) != cudaSuccess)
+			printf("GPU %d, reading kangaroo distances failed\r\n", CudaIndex);
+		else if (fwrite(buf, 1, d_size, fp) != d_size)
+			printf("GPU %d, writing kangaroo distances failed\r\n", CudaIndex);
+		else
+			ok = true;
+		free(buf);
+	}
+	ckpt_cr.Leave();
+	return ok;
+}
+
 void RCGpuKang::DoRestartKangs()
 {
 	cr.Enter();
@@ -562,26 +671,10 @@ void RCGpuKang::GenerateRndDistances()
 	}
 }
 
-bool RCGpuKang::Start()
+//computes every kangaroo's starting point from a fresh random distance
+bool RCGpuKang::GenerateStartPoints()
 {
-	if (Failed)
-		return false;
-
 	cudaError_t err;
-	err = cudaSetDevice(CudaIndex);
-	if (err != cudaSuccess)
-		return false;
-
-	HalfRange.Set(1);
-	HalfRange.ShiftLeft(Range - 1);
-	PntHalfRange = ec.MultiplyG(HalfRange);
-	NegPntHalfRange = PntHalfRange;
-	NegPntHalfRange.y.NegModP();
-
-	PntWild = PntToSolve; //to smooth edges PntToSolve = RealPnt+x32 (added in caller)
-	PntWild.y.NegModP(); //negate
-
-	RndPnts = (TPointPriv*)malloc(KangCnt * 96);
 	GenerateRndDistances();
 /* 
 	//we can calc start points on CPU
@@ -645,6 +738,37 @@ bool RCGpuKang::Start()
 		return false;
 	}
 	free(gpu_pnts);
+	return true;
+}
+
+bool RCGpuKang::Start()
+{
+	if (Failed)
+		return false;
+
+	cudaError_t err;
+	err = cudaSetDevice(CudaIndex);
+	if (err != cudaSuccess)
+		return false;
+
+	HalfRange.Set(1);
+	HalfRange.ShiftLeft(Range - 1);
+	PntHalfRange = ec.MultiplyG(HalfRange);
+	NegPntHalfRange = PntHalfRange;
+	NegPntHalfRange.y.NegModP();
+
+	PntWild = PntToSolve; //to smooth edges PntToSolve = RealPnt+x32 (added in caller)
+	PntWild.y.NegModP(); //negate
+
+	RndPnts = (TPointPriv*)malloc(KangCnt * 96);
+	// Resume restores each kangaroo's point and distance directly from the
+	// checkpoint; everything below this is zeroed either way, which is exactly
+	// the state a cold start begins in. See Checkpoint.h.
+	bool resumed = CkptResume && RestoreKangsFromCkpt();
+	if (CkptResume && !resumed)
+		printf("GPU %d, checkpoint restore failed, falling back to random kangaroos\r\n", CudaIndex);
+	if (!resumed && !GenerateStartPoints())
+		return false;
 
 	// Must match the allocation above.
 	err = cudaMemset(Kparams.L1S2, 0, (u64)Kparams.BlockCnt * Kparams.BlockSize * sizeof(u32));
@@ -652,6 +776,7 @@ bool RCGpuKang::Start()
 		return false;
 	cudaMemset(Kparams.dbg_buf, 0, 1024);
 	cudaMemset(Kparams.LoopTable, 0, KangCnt * MD_LEN * sizeof(u64));
+	DevMemValid = true;
 	return true;
 }
 
@@ -703,10 +828,12 @@ extern u32 gTotalErrors;
 void RCGpuKang::Execute()
 {
 	cudaSetDevice(CudaIndex);
+	QuiescedFlag = false;
 
 	if (!Start())
 	{
 		gTotalErrors++;
+		QuiescedFlag = true;
 		return;
 	}
 #ifdef DEBUG_MODE
@@ -715,6 +842,19 @@ void RCGpuKang::Execute()
 	cudaError_t err;	
 	while (!StopFlag)
 	{
+		if (PauseFlag)
+		{
+			//The only point in the loop where the device is quiescent: the
+			//previous batch was synchronised by its blocking DPs_out copy and
+			//the next one has not launched, so the main thread can read the
+			//kangaroo state without tearing it.
+			QuiescedFlag = true;
+			while (PauseFlag && !StopFlag)
+				Sleep(2);
+			if (!StopFlag)
+				QuiescedFlag = false;
+		}
+
 		u64 t1 = GetTickCount64();
 		cudaMemset(Kparams.DPs_out, 0, 4);
 		cudaMemset(Kparams.DPTable, 0, KangCnt * sizeof(u32));
@@ -811,7 +951,14 @@ void RCGpuKang::Execute()
 		
 	}
 
+	//Under the lock so a checkpoint in progress finishes reading the
+	//allocations before they are freed.
+	ckpt_cr.Enter();
+	DevMemValid = false;
+	ckpt_cr.Leave();
+
 	Release();
+	QuiescedFlag = true;
 }
 
 void RCGpuKang::ToRestartKangaroo(int KangInd)
