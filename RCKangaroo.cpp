@@ -6,6 +6,8 @@
 
 #include <iostream>
 #include <vector>
+#include <signal.h>
+#include <stdlib.h>	//_Exit
 
 #ifdef __HIP_PLATFORM_AMD__
 #include "cdna/cuda_compat.h"
@@ -17,6 +19,7 @@
 #include "defs.h"
 #include "utils.h"
 #include "GpuKang.h"
+#include "Checkpoint.h"
 
 
 EcJMP EcJumps1[JMP_CNT];
@@ -59,6 +62,20 @@ char gTamesFileName[1024];
 double gMax;
 bool gGenMode; //tames generation mode
 bool gIsOpsLimit;
+bool gInterrupted; //stopped by Ctrl+C or SIGTERM rather than by finding the key
+bool gCkptError; //a checkpoint was given but could not be resumed
+
+//Set from a signal handler, so it must stay a bare flag store. The main loop
+//is what actually reacts to it; a second signal leaves immediately, because
+//writing a multi-gigabyte checkpoint is not something to be trapped in.
+static volatile sig_atomic_t gStopRequested = 0;
+
+static void OnStopSignal(int)
+{
+	if (gStopRequested)
+		_Exit(2);
+	gStopRequested = 1;
+}
 
 #pragma pack(push, 1)
 struct DBRec
@@ -405,7 +422,7 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 
 
 
-	if (!gGenMode && gTamesFileName[0])
+	if (!gGenMode && gTamesFileName[0] && !(Ckpt_IsEnabled() && Ckpt_FileExists()))
 	{
 		printf("load tames...\r\n");
 		if (db.LoadFromFile(gTamesFileName))
@@ -475,7 +492,26 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 			printf("GPU %d Prepare failed\r\n", GpuKangs[i]->CudaIndex);
 		}
 
-	u64 tm0 = GetTickCount64();
+	//Resume has to happen after Prepare, which is what fixes each GPU's
+	//KangCnt, and before the workers start, because Start() is what reads the
+	//kangaroo block.
+	u64 resumed_ms = 0;
+	if (Ckpt_IsEnabled() && Ckpt_FileExists())
+	{
+		u64 resumed_ops = 0;
+		if (!Ckpt_Load(PntToSolve, Range, DP, &resumed_ops, &resumed_ms))
+		{
+			//Starting over would discard the saved work and then overwrite it at
+			//the next interval, so stop and let the operator decide.
+			printf("checkpoint: refusing to start from scratch and overwrite %s\r\n", Ckpt_FileName());
+			gCkptError = true;
+			return false;
+		}
+		PntTotalOps = resumed_ops;
+	}
+
+	//wound back so the elapsed time and ETA account for the earlier sessions
+	u64 tm0 = GetTickCount64() - resumed_ms;
 	printf("GPUs started...\r\n");
 
 #ifdef _WIN32
@@ -497,6 +533,7 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 	}
 
 	u64 tm_stats = GetTickCount64();
+	u64 tm_ckpt = GetTickCount64();
 	while (!gSolved)
 	{
 		CheckNewPoints();
@@ -507,6 +544,24 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 			tm_stats = GetTickCount64();
 		}
 
+		if (gStopRequested)
+		{
+			gInterrupted = true;
+			if (Ckpt_IsEnabled())
+				printf("\r\nInterrupted, saving checkpoint (press Ctrl+C again to abort now)...\r\n");
+			else if (gGenMode && gTamesFileName[0])
+				printf("\r\nInterrupted, saving tames (press Ctrl+C again to abort now)...\r\n");
+			else
+				printf("\r\nInterrupted. No -ckpt file was given, so this run's progress is lost.\r\n");
+			break;
+		}
+
+		if (Ckpt_IsEnabled() && (GetTickCount64() - tm_ckpt > (u64)Ckpt_IntervalSec() * 1000))
+		{
+			Ckpt_Save(GetTickCount64() - tm0);
+			tm_ckpt = GetTickCount64();
+		}
+
 		if ((MaxTotalOps > 0.0) && (PntTotalOps > MaxTotalOps))
 		{
 			gIsOpsLimit = true;
@@ -514,6 +569,11 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 			break;
 		}
 	}
+
+	//Must come before Stop(): a stopped worker calls Release() and frees the
+	//device memory the kangaroo state lives in.
+	if (Ckpt_IsEnabled() && !gSolved)
+		Ckpt_Save(GetTickCount64() - tm0);
 
 	printf("Stopping work ...\r\n");
 	for (int i = 0; i < GpuCnt; i++)
@@ -529,7 +589,7 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 #endif
 	}
 
-	if (gIsOpsLimit)
+	if (gIsOpsLimit || gInterrupted)
 	{
 		if (gGenMode)
 		{
@@ -630,6 +690,34 @@ bool ParseCommandLine(int argc, char* argv[])
 			ci++;
 		}
 		else
+		if (strcmp(argument, "-ckpt") == 0)
+		{
+			if (ci >= argc)
+			{
+				printf("error: missed value after -ckpt option\r\n");
+				return false;
+			}
+			Ckpt_Configure(argv[ci], 0);
+			ci++;
+		}
+		else
+		if (strcmp(argument, "-ckpt-interval") == 0)
+		{
+			if (ci >= argc)
+			{
+				printf("error: missed value after -ckpt-interval option\r\n");
+				return false;
+			}
+			int val = atoi(argv[ci]);
+			ci++;
+			if ((val < 1) || (val > 1440))
+			{
+				printf("error: invalid value for -ckpt-interval option, use 1..1440 minutes\r\n");
+				return false;
+			}
+			Ckpt_Configure(NULL, val);
+		}
+		else
 		if (strcmp(argument, "-max") == 0)
 		{
 			double val = atof(argv[ci]);
@@ -697,9 +785,17 @@ int main(int argc, char* argv[])
 	gMax = 0.0;
 	gGenMode = false;
 	gIsOpsLimit = false;
+	gInterrupted = false;
+	gCkptError = false;
+	Ckpt_Configure(NULL, 10); //default interval when -ckpt is used
 	memset(gGPUs_Mask, 1, sizeof(gGPUs_Mask));
 	if (!ParseCommandLine(argc, argv))
 		return 0;
+
+	//Graceful stop: park the GPUs, write the checkpoint, then exit. Without a
+	//handler the process dies mid-batch and the run is lost.
+	signal(SIGINT, OnStopSignal);
+	signal(SIGTERM, OnStopSignal);
 
 	InitGpus();
 
@@ -715,6 +811,20 @@ int main(int argc, char* argv[])
 	TotalSolved = 0;
 	gTotalErrors = 0;
 	IsBench = gPubKey.x.IsZero();
+
+	if (Ckpt_IsEnabled())
+	{
+		//Benchmark and tames-generation modes solve a fresh random point on
+		//every pass, so a saved kangaroo state would belong to a search that no
+		//longer exists. Tames generation still saves its database on Ctrl+C.
+		if (IsBench || gGenMode)
+		{
+			printf("Checkpointing is only available in main mode, ignoring -ckpt\r\n");
+			Ckpt_Disable();
+		}
+		else
+			printf("Checkpoint file: %s, every %d min\r\n", Ckpt_FileName(), Ckpt_IntervalSec() / 60);
+	}
 
 	if (!IsBench && !gGenMode)
 	{
@@ -743,7 +853,7 @@ int main(int argc, char* argv[])
 
 		if (!SolvePoint(PntToSolve, gRange, gDP, &pk_found))
 		{
-			if (!gIsOpsLimit)
+			if (!gIsOpsLimit && !gInterrupted && !gCkptError)
 				printf("FATAL ERROR: SolvePoint failed\r\n");
 			goto label_end;
 		}
@@ -759,6 +869,8 @@ int main(int argc, char* argv[])
 		char s[100];
 		pk_found.GetHexStr(s);
 		printf("\r\nPRIVATE KEY: %s\r\n\r\n", s);
+		if (Ckpt_IsEnabled() && Ckpt_FileExists())
+			printf("Delete the checkpoint %s before starting a new search with it.\r\n", Ckpt_FileName());
 		FILE* fp = fopen("RESULTS.TXT", "a");
 		if (fp)
 		{
@@ -799,7 +911,7 @@ int main(int argc, char* argv[])
 
 			if (!SolvePoint(PntToSolve, gRange, gDP, &pk_found))
 			{
-				if (!gIsOpsLimit)
+				if (!gIsOpsLimit && !gInterrupted && !gCkptError)
 					printf("FATAL ERROR: SolvePoint failed\r\n");
 				break;
 			}
