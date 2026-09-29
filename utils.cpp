@@ -59,6 +59,10 @@ u64 GetTickCount64()
 #define DB_REC_LEN			32
 #define DB_FIND_LEN			9
 #define DB_MIN_GROW_CNT		2
+//the 3-byte prefix table alone is 16.7M list counts, so the default 4KB stdio
+//buffer turns a save into millions of tiny writes. Matters for checkpoints,
+//which write the whole database on every interval.
+#define DB_IO_BUF_SIZE		(8 * 1024 * 1024)
 
 //we need advanced memory management to reduce memory fragmentation
 //everything will be stable up to about 8TB RAM
@@ -233,17 +237,25 @@ bool TFastBase::LoadFromFile(char* fn)
 	FILE* fp = fopen(fn, "rb");
 	if (!fp)
 		return false;
+	setvbuf(fp, NULL, _IOFBF, DB_IO_BUF_SIZE);
+	bool res = LoadFromStream(fp);
+	fclose(fp);
+	return res;
+}
+
+bool TFastBase::LoadFromStream(FILE* fp)
+{
+	Clear();
 	if (fread(Header, 1, sizeof(Header), fp) != sizeof(Header))
-	{
-		fclose(fp);
 		return false;
-	}
 	for (int i = 0; i < 256; i++)
 		for (int j = 0; j < 256; j++)
 			for (int k = 0; k < 256; k++)
 			{
 				TListRec* list = &lists[i][j][k];
-				fread(&list->cnt, 1, 2, fp);
+				//checked: resume depends on detecting a truncated file here
+				if (fread(&list->cnt, 1, 2, fp) != 2)
+					return false;
 				if (list->cnt)
 				{
 					u32 grow = list->cnt / 2;
@@ -261,14 +273,10 @@ bool TFastBase::LoadFromFile(char* fn)
 						void* ptr = mps[i].AllocRec(&cmp_ptr);
 						list->data[m] = cmp_ptr;
 						if (fread(ptr, 1, DB_REC_LEN, fp) != DB_REC_LEN)
-						{
-							fclose(fp);
 							return false;
-						}
 					}
 				}
 			}
-	fclose(fp);
 	return true;
 }
 
@@ -277,11 +285,17 @@ bool TFastBase::SaveToFile(char* fn)
 	FILE* fp = fopen(fn, "wb");
 	if (!fp)
 		return false;
+	setvbuf(fp, NULL, _IOFBF, DB_IO_BUF_SIZE);
+	bool res = SaveToStream(fp);
+	if (fclose(fp) != 0)
+		res = false;
+	return res;
+}
+
+bool TFastBase::SaveToStream(FILE* fp)
+{
 	if (fwrite(Header, 1, sizeof(Header), fp) != sizeof(Header))
-	{
-		fclose(fp);
 		return false;
-	}
 	for (int i = 0; i < 256; i++)
 		for (int j = 0; j < 256; j++)
 			for (int k = 0; k < 256; k++)
@@ -292,13 +306,9 @@ bool TFastBase::SaveToFile(char* fn)
 				{
 					void* ptr = mps[i].GetRecPtr(list->data[m]);
 					if (fwrite(ptr, 1, DB_REC_LEN, fp) != DB_REC_LEN)
-					{
-						fclose(fp);
 						return false;
-					}
 				}
 			}
-	fclose(fp);
 	return true;
 }
 

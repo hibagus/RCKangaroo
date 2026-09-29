@@ -101,6 +101,10 @@ public:
 	u64 GetBlockCnt();
 	bool LoadFromFile(char* fn);
 	bool SaveToFile(char* fn);
+	//same as above but on an already-open stream, so the DP database can be one
+	//section of a larger file (see Checkpoint.cpp). LoadFromStream clears first.
+	bool LoadFromStream(FILE* fp);
+	bool SaveToStream(FILE* fp);
 };
 
 bool IsFileExist(char* fn);
