@@ -47,6 +47,7 @@
     <li>
       <a href="#usage">Usage</a>
       <ul>
+        <li><a href="#checkpointing-and-resume">Checkpointing and resume</a></li>
         <li><a href="#tuning">Tuning</a></li>
         <li><a href="#testing">Testing</a></li>
       </ul>
@@ -147,6 +148,52 @@ Command-line options are RC's and unchanged; see the original README below.
     -start 80000000000000000000000000000000000 \
     -pubkey 031f6a332d3c5c4f2de2378c012f429cd109ba07d69690c6c701b6bb87860d6640
 ```
+
+### Checkpointing and resume
+
+A search over a large range runs for days, so the port adds `-ckpt`. The solver writes its
+state periodically and on `Ctrl+C`, and picks up from that file on the next start.
+
+```sh
+./build-hip/rckangaroo-cdna -dp 30 -range 139 \
+    -start 80000000000000000000000000000000000 \
+    -pubkey 031f6a332d3c5c4f2de2378c012f429cd109ba07d69690c6c701b6bb87860d6640 \
+    -ckpt puzzle140.ckpt -ckpt-interval 15
+```
+
+| Option | Default | Notes |
+| --- | --- | --- |
+| `-ckpt <file>` | off | Checkpoint file. Resumed from if it already exists, written to on interval and on exit. |
+| `-ckpt-interval <minutes>` | 10 | Automatic interval, 1–1440. |
+
+`Ctrl+C` (or `SIGTERM`, so job schedulers work) stops at the next batch boundary, saves, and
+exits. A second `Ctrl+C` aborts immediately without saving.
+
+**What is saved.** The DP database, every kangaroo's point and accumulated distance, the
+operation count and the elapsed time. Resuming continues the same search rather than
+restarting it — the reported K and ETA carry across sessions.
+
+**What is not.** The loop-detection state (`LoopTable`, `LastPnts`, `L1S2`) is zeroed on
+resume. That is exactly the state a cold start begins in — `LastPnts` is never initialised
+even on a fresh run — and a kangaroo mid-loop-escape re-detects within `MD_LEN` steps.
+Saving it would cost about 4.8 GB per MI300X to avoid a few thousand wasted jumps.
+
+**Cost.** The GPUs are parked while the file is written, so the interval trades throughput
+against how much work an unplanned stop loses. Measured on 8 CPX partitions: a 1.2 GB
+checkpoint took 3.9 s, which at the default 10-minute interval is 0.7% of throughput.
+Budget roughly 96 bytes per kangaroo plus 32 bytes per stored DP, and enough free space for
+one more copy — the file is written alongside and renamed into place, so an interrupted
+save can never corrupt the previous one.
+
+**Refusals.** A checkpoint records the public key, `-start`, `-range` and `-dp` it was made
+for, and the solver refuses to resume a file that does not match rather than silently
+starting over and overwriting it. A changed kangaroo layout (different `RCK_BLOCKS_PER_CU`,
+different GPU count) is not fatal: the database is still used and only the kangaroos are
+regenerated, which costs about `KangCnt x 2^DP` operations of in-flight work.
+
+Checkpointing applies to main mode only — benchmark and tames-generation modes solve a fresh
+random point on every pass, so a saved kangaroo state would belong to a search that no longer
+exists. Tames generation does now save its database on `Ctrl+C` instead of discarding it.
 
 ### Tuning
 
@@ -261,6 +308,7 @@ For context, the arithmetic already runs at **87% of VALU peak** measured in iso
 - [ ] Verify on CDNA4 (gfx950) hardware — builds but has never been run
 - [ ] Rework `-gpu` to address more than 10 devices, which CPX exposes
 - [ ] Move `jmp_y` back into LDS, trading 32 of 220 bytes per point-addition against a wave of occupancy
+- [x] Checkpoint and resume, so a multi-day search survives an interruption
 - [ ] Host-side usability: dynamic DP validation, per-GPU statistics, progress display
 
 See the [open issues](https://github.com/hibagus/RCKangaroo/issues) for a full list.
